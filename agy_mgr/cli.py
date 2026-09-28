@@ -68,7 +68,10 @@ def cmd_switch(args):
 
 
 def cmd_quota(args):
-    quotas = get_all_accounts_quota()
+    refresh_all = getattr(args, "refresh_all", False)
+    if refresh_all:
+        print("[*] Đang cập nhật live quota cho tất cả tài khoản...")
+    quotas = get_all_accounts_quota(refresh_all=refresh_all)
     print_quota_table(quotas)
 
 
@@ -182,6 +185,7 @@ def main():
 
     # quota
     p_quota = subparsers.add_parser("quota", aliases=["q"], help="Xem bảng Quota của tất cả tài khoản")
+    p_quota.add_argument("--refresh-all", "-r", action="store_true", help="Quét và cập nhật live quota cho toàn bộ tài khoản")
     p_quota.set_defaults(func=cmd_quota)
 
     # sessions

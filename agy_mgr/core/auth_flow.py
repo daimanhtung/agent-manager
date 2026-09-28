@@ -29,13 +29,13 @@ def add_account_via_cli(name: str) -> bool:
     env = os.environ.copy()
     env["HOME"] = str(temp_home)
 
-    cmd = [AGY_BIN, "-p", "Say 'Login success' in 3 words"]
+    cmd = [AGY_BIN]
     try:
-        # Run agy in the temporary home
-        proc = subprocess.run(cmd, env=env)
+        # Run interactive agy so user can complete browser OAuth prompt
+        subprocess.call(cmd, env=env)
+
         temp_gemini = temp_home / ".gemini"
         if temp_gemini.exists():
-            # Check if tokens were created
             email = extract_email_from_gemini_dir(temp_gemini)
             if email and email != "unknown@user":
                 print(f"\n[+] Đăng nhập thành công tài khoản: {email}")
@@ -43,15 +43,9 @@ def add_account_via_cli(name: str) -> bool:
                 set_active_account_name(name)
                 print(f"[+] Đã lưu profile '{name}' và đặt làm tài khoản active!")
                 return True
-            else:
-                # Still check if auth files exist
-                save_profile(name, gemini_dir=temp_gemini)
-                set_active_account_name(name)
-                print(f"[+] Đã lưu profile '{name}'!")
-                return True
-        else:
-            print("[-] Không tìm thấy dữ liệu xác thực sau khi hoàn thành.")
-            return False
+
+        print("\n[-] Chưa hoàn thành đăng nhập (không tìm thấy token xác thực hợp lệ).")
+        return False
     except KeyboardInterrupt:
         print("\n[!] Đã hủy quá trình đăng nhập.")
         return False

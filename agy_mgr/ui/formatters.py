@@ -57,39 +57,68 @@ def print_accounts_table(accounts: List[Dict[str, Any]]):
     print("─" * 80)
 
 
+import re
+
+def strip_ansi(text: str) -> str:
+    """Remove ANSI escape codes for accurate length calculation."""
+    return re.sub(r'\033\[[0-9;]*m', '', text)
+
+
+def pad(text: str, width: int, align: str = "left") -> str:
+    """Pad string to width taking into account ANSI escape codes."""
+    vis_len = len(strip_ansi(text))
+    extra = max(0, width - vis_len)
+    if align == "right":
+        return (" " * extra) + text
+    return text + (" " * extra)
+
+
 def print_quota_table(quotas: List[Dict[str, Any]]):
     """Print detailed live quota status table for all accounts."""
     print_header("BẢNG THEO DÕI QUOTA TẤT CẢ TÀI KHOẢN")
-    header = (
-        f"{BOLD}{'Tài khoản':<18} {'Trạng thái':<16} "
-        f"{'Gemini (5h)':<28} {'Gemini (Tuần)':<28} {'Reset vào':<15}{RESET}"
-    )
+    cols = [
+        ("Tài khoản", 20),
+        ("Trạng thái", 20),
+        ("Gemini (5h)", 22),
+        ("Gemini (Tuần)", 22),
+        ("Reset vào", 18),
+    ]
+    header = " ".join([pad(f"{BOLD}{c[0]}{RESET}", c[1]) for c in cols])
     print(header)
     print("─" * 105)
 
     for q in quotas:
         name = q["name"]
         if q["is_active"]:
-            name = f"{GREEN}★ {name}{RESET}"
+            name_display = f"{GREEN}★ {name}{RESET}"
         else:
-            name = f"  {name}"
+            name_display = f"  {name}"
 
         status = q["status"]
         if "Active" in status:
             status_color = f"{GREEN}{status}{RESET}"
         elif "Cooldown" in status or "Exhausted" in status:
             status_color = f"{RED}{status}{RESET}"
-        else:
+        elif "Cached" in status:
             status_color = f"{CYAN}{status}{RESET}"
+        else:
+            status_color = f"{DIM}{status}{RESET}"
 
         bar_5h = render_progress_bar(q.get("gemini_5h"))
         bar_wk = render_progress_bar(q.get("gemini_weekly"))
         reset_time = q.get("reset_5h") or q.get("reset_weekly") or "─"
 
-        print(f"{name:<27} {status_color:<25} {bar_5h:<38} {bar_wk:<38} {reset_time}")
+        row = (
+            f"{pad(name_display, 20)} "
+            f"{pad(status_color, 20)} "
+            f"{pad(bar_5h, 22)} "
+            f"{pad(bar_wk, 22)} "
+            f"{pad(reset_time, 18)}"
+        )
+        print(row)
 
     print("─" * 105)
-    print(f"{DIM}Ghi chú: [★] là tài khoản đang được kích hoạt cho Antigravity CLI & App.{RESET}\n")
+    print(f"{DIM}Ghi chú: [★] là tài khoản đang active. Dùng 'agy-mgr quota -r' để quét live toàn bộ.{RESET}\n")
 
 
 def print_sessions_table(sessions: List[Dict[str, Any]]):

@@ -30,12 +30,19 @@ def decode_jwt_email(jwt_token: str) -> Optional[str]:
 
 
 def extract_email_from_gemini_dir(gemini_dir: Path = GEMINI_HOME) -> str:
-    """Extract email from tokens in a gemini directory."""
-    # 1. Try jetski-standalone-oauth-token
-    p1 = gemini_dir / "jetski-standalone-oauth-token"
-    if p1.exists():
+    """Extract email from tokens in a gemini directory, prioritizing the freshest token file."""
+    candidates = [
+        gemini_dir / "antigravity-cli" / "antigravity-oauth-token",
+        gemini_dir / "jetski-standalone-oauth-token",
+        gemini_dir / "oauth_creds.json",
+    ]
+    # Sort by mtime descending (most recently modified first)
+    existing = [p for p in candidates if p.exists()]
+    existing.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+    for p in existing:
         try:
-            with open(p1, "r", encoding="utf-8") as f:
+            with open(p, "r", encoding="utf-8") as f:
                 d = json.load(f)
                 id_token = d.get("id_token") or (d.get("token", {}).get("id_token") if isinstance(d.get("token"), dict) else None)
                 if id_token:
@@ -45,25 +52,11 @@ def extract_email_from_gemini_dir(gemini_dir: Path = GEMINI_HOME) -> str:
         except Exception:
             pass
 
-    # 2. Try oauth_creds.json
-    p2 = gemini_dir / "oauth_creds.json"
-    if p2.exists():
+    # Fallback: Try google_accounts.json
+    p_gacc = gemini_dir / "google_accounts.json"
+    if p_gacc.exists():
         try:
-            with open(p2, "r", encoding="utf-8") as f:
-                d = json.load(f)
-                id_tok = d.get("id_token")
-                if id_tok:
-                    em = decode_jwt_email(id_tok)
-                    if em:
-                        return em
-        except Exception:
-            pass
-
-    # 3. Try google_accounts.json
-    p3 = gemini_dir / "google_accounts.json"
-    if p3.exists():
-        try:
-            with open(p3, "r", encoding="utf-8") as f:
+            with open(p_gacc, "r", encoding="utf-8") as f:
                 d = json.load(f)
                 if d.get("active"):
                     return d["active"]
@@ -146,13 +139,36 @@ def save_profile(name: str, gemini_dir: Path = GEMINI_HOME, metadata_extra: Opti
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
 
-    email = extract_email_from_gemini_dir(target_dir)
+    # Sync between jetski-standalone-oauth-token and antigravity-cli/antigravity-oauth-token if one exists
+    f_standalone = target_dir / "jetski-standalone-oauth-token"
+    f_cli = target_dir / "antigravity-cli" / "antigravity-oauth-token"
+    if f_cli.exists() and not f_standalone.exists():
+        shutil.copy2(f_cli, f_standalone)
+    elif f_standalone.exists() and not f_cli.exists():
+        f_cli.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(f_standalone, f_cli)
+
+    meta_file = target_dir / "meta.json"
+    existing_meta = {}
+    if meta_file.exists():
+        try:
+            with open(meta_file, "r", encoding="utf-8") as f:
+                existing_meta = json.load(f)
+        except Exception:
+            pass
+
+    email = (metadata_extra or {}).get("email") or existing_meta.get("email")
+    if not email or email == "unknown@user":
+        email = extract_email_from_gemini_dir(target_dir)
+
     meta = {
         "name": name,
         "email": email,
         "saved_at": datetime.now().isoformat(),
         "type": "oauth"
     }
+    if existing_meta:
+        meta.update({k: v for k, v in existing_meta.items() if k not in ["saved_at"]})
     if metadata_extra:
         meta.update(metadata_extra)
 
@@ -174,6 +190,25 @@ def load_profile(name: str, gemini_dir: Path = GEMINI_HOME) -> bool:
             dst = gemini_dir / rel_path
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
+
+    # Ensure both token files exist in target gemini_dir
+    f_standalone = gemini_dir / "jetski-standalone-oauth-token"
+    f_cli = gemini_dir / "antigravity-cli" / "antigravity-oauth-token"
+    if f_cli.exists() and not f_standalone.exists():
+        shutil.copy2(f_cli, f_standalone)
+    elif f_standalone.exists() and not f_cli.exists():
+        f_cli.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(f_standalone, f_cli)
+
+    # Update google_accounts.json
+    email = extract_email_from_gemini_dir(gemini_dir)
+    if email and email != "unknown@user":
+        gacc = gemini_dir / "google_accounts.json"
+        try:
+            with open(gacc, "w", encoding="utf-8") as f:
+                json.dump({"active": email, "old": []}, f, indent=2)
+        except Exception:
+            pass
 
     set_active_account_name(name)
     return True

@@ -118,12 +118,40 @@ def format_reset_time(iso_str: Optional[str]) -> str:
         return iso_str
 
 
-def get_all_accounts_quota() -> List[Dict[str, Any]]:
-    """Retrieve quota for all registered accounts."""
+def get_all_accounts_quota(refresh_all: bool = False) -> List[Dict[str, Any]]:
+    """Retrieve quota for all registered accounts, using live query for active and cache for standby."""
+    from agy_mgr.core.accounts import get_state, save_state, switch_account
+
     accounts = list_accounts()
     active_name = get_active_account_name()
+    state = get_state()
+    cached_quotas = state.get("cached_quotas", {})
+
+    # If refresh_all requested, cycle through each account to get fresh live quota
+    if refresh_all and len(accounts) > 1:
+        orig_active = active_name
+        for acc in accounts:
+            a_name = acc["name"]
+            switch_account(a_name)
+            time.sleep(1.0)
+            ls_info = find_running_language_server()
+            if ls_info:
+                q = fetch_quota_from_ls(ls_info)
+                if q:
+                    cached_quotas[a_name] = q
+        if orig_active:
+            switch_account(orig_active)
+        state["cached_quotas"] = cached_quotas
+        save_state(state)
+
     ls_info = find_running_language_server()
     live_quota = fetch_quota_from_ls(ls_info) if ls_info else None
+
+    # Update cache for current active account if live quota obtained
+    if active_name and live_quota:
+        cached_quotas[active_name] = live_quota
+        state["cached_quotas"] = cached_quotas
+        save_state(state)
 
     result = []
     for acc in accounts:
@@ -156,6 +184,15 @@ def get_all_accounts_quota() -> List[Dict[str, Any]]:
                 item["status"] = "Exhausted"
             else:
                 item["status"] = "Active (Live)"
+        elif name in cached_quotas:
+            # Use cached quota for standby account
+            c_q = cached_quotas[name]
+            item["gemini_5h"] = c_q.get("gemini_5h_fraction")
+            item["gemini_weekly"] = c_q.get("gemini_weekly_fraction")
+            item["claude_weekly"] = c_q.get("claude_weekly_fraction")
+            item["reset_5h"] = format_reset_time(c_q.get("gemini_5h_reset"))
+            item["reset_weekly"] = format_reset_time(c_q.get("gemini_weekly_reset"))
+            item["status"] = "Standby (Cached)"
         else:
             item["status"] = "Standby (Available)"
 
