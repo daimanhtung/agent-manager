@@ -1,4 +1,5 @@
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import List
@@ -167,6 +168,25 @@ def cmd_import(args):
     print(f"{GREEN}[+] Đã import thành công profile '{name}' từ {source_dir}!{RESET}")
 
 
+def cmd_completion(args):
+    shell = args.shell
+    if not shell:
+        user_shell = os.environ.get("SHELL", "")
+        shell = "zsh" if "zsh" in user_shell else "bash"
+
+    from agy_mgr.core.completion import get_completion_script, install_completion
+
+    if args.install:
+        if install_completion(shell):
+            rc = "~/.zshrc" if shell == "zsh" else "~/.bashrc"
+            print(f"{GREEN}[✓] Đã cài đặt auto-completion vào {rc}!{RESET}")
+            print(f"[*] Hãy chạy: {BOLD}source {rc}{RESET} hoặc mở lại terminal mới để bắt đầu dùng phím Tab gợi ý.")
+        else:
+            print("[-] Cài đặt completion thất bại.")
+    else:
+        print(get_completion_script(shell))
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="agy-mgr",
@@ -223,6 +243,12 @@ def main():
     p_app_launch.add_argument("profile", nargs="?", help="Tên profile độc lập")
     p_app_launch.add_argument("--workspace", "-w", help="Đường dẫn thư mục project để mở")
     p_app.set_defaults(func=cmd_app)
+
+    # completion
+    p_comp = subparsers.add_parser("completion", help="Cài đặt auto-completion gợi ý lệnh trong terminal")
+    p_comp.add_argument("shell", nargs="?", choices=["zsh", "bash"], help="Loại shell (zsh hoặc bash)")
+    p_comp.add_argument("--install", "-i", action="store_true", help="Tự động cài đặt cấu hình vào .zshrc hoặc .bashrc")
+    p_comp.set_defaults(func=cmd_completion)
 
     args = parser.parse_args()
     if hasattr(args, "func"):

@@ -77,8 +77,9 @@ if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
     export PATH="$BIN_DIR:$PATH"
 fi
 
-# 5. Initialize active profile if needed
+# 5. Initialize active profile & shell completion
 python3 -c "from agy_mgr.core.accounts import auto_import_current_if_empty; auto_import_current_if_empty()" 2>/dev/null || true
+"$BIN_DIR/agy-mgr" completion --install >/dev/null 2>&1 || true
 
 # 6. Success message
 echo -e "\n${BOLD}${GREEN}======================================================${RESET}"
