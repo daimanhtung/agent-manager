@@ -101,11 +101,37 @@ def read_db_sessions(db_path: Path, source_label: str) -> List[Dict[str, Any]]:
     return sessions
 
 
+def merge_syncthing_conflict_dbs():
+    """
+    Automatically detect and merge any Syncthing conflict databases
+    (e.g., conversation_summaries.sync-conflict-*.db) into the main database.
+    """
+    for main_db in [APP_CONV_DB, CLI_CONV_DB]:
+        if not main_db.exists():
+            continue
+        parent = main_db.parent
+        conflicts = list(parent.glob(f"{main_db.stem}.sync-conflict-*.db"))
+        for c_db in conflicts:
+            try:
+                conn = sqlite3.connect(main_db)
+                conn.execute(f"ATTACH '{c_db}' AS other;")
+                conn.execute("INSERT OR IGNORE INTO main.conversation_summaries SELECT * FROM other.conversation_summaries;")
+                conn.commit()
+                conn.execute("DETACH other;")
+                conn.close()
+                c_db.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
 def list_all_sessions(limit: int = 25, filter_workspace: Optional[str] = None, search: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Get combined, deduplicated sessions from both Antigravity App and Antigravity CLI.
     Sorted by most recent activity.
     """
+    # Merge any incoming Syncthing conflict databases automatically
+    merge_syncthing_conflict_dbs()
+
     app_sessions = read_db_sessions(APP_CONV_DB, "App")
     cli_sessions = read_db_sessions(CLI_CONV_DB, "CLI")
 
