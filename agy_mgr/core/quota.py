@@ -88,8 +88,10 @@ def parse_quota_response(raw: Dict[str, Any]) -> Dict[str, Any]:
                     parsed["gemini_weekly_reset"] = reset
         elif "claude" in dname or "gpt" in dname:
             for b in buckets:
-                parsed["claude_weekly_fraction"] = b.get("remainingFraction")
-                parsed["claude_weekly_reset"] = b.get("resetTime")
+                win = b.get("window", "")
+                if win == "weekly" or "weekly" in b.get("displayName", "").lower():
+                    parsed["claude_weekly_fraction"] = b.get("remainingFraction")
+                    parsed["claude_weekly_reset"] = b.get("resetTime")
 
     return parsed
 
@@ -216,6 +218,7 @@ def get_all_accounts_quota(refresh_all: bool = False) -> List[Dict[str, Any]]:
             "claude_weekly": None,
             "reset_5h": None,
             "reset_weekly": None,
+            "claude_reset": None,
             "status": "Ready"
         }
 
@@ -252,6 +255,7 @@ def get_all_accounts_quota(refresh_all: bool = False) -> List[Dict[str, Any]]:
             item["claude_weekly"] = q.get("claude_weekly_fraction")
             item["reset_5h"] = format_reset_time(q.get("gemini_5h_reset"))
             item["reset_weekly"] = format_reset_time(q.get("gemini_weekly_reset"))
+            item["claude_reset"] = format_reset_time(q.get("claude_weekly_reset"))
             if item["gemini_5h"] == 0 or item["gemini_weekly"] == 0:
                 item["status"] = "Exhausted"
             elif item["is_active"]:

@@ -77,15 +77,17 @@ def print_quota_table(quotas: List[Dict[str, Any]]):
     """Print detailed live quota status table for all accounts."""
     print_header("BẢNG THEO DÕI QUOTA TẤT CẢ TÀI KHOẢN")
     cols = [
-        ("Tài khoản", 20),
-        ("Trạng thái", 20),
-        ("Gemini (5h)", 22),
-        ("Gemini (Tuần)", 22),
-        ("Reset vào", 18),
+        ("Tài khoản", 18),
+        ("Trạng thái", 18),
+        ("Gemini (5h)", 20),
+        ("Reset 5h", 12),
+        ("Gemini (Tuần)", 20),
+        ("Reset Tuần", 14),
+        ("Claude (Tuần)", 20),
     ]
     header = " ".join([pad(f"{BOLD}{c[0]}{RESET}", c[1]) for c in cols])
     print(header)
-    print("─" * 105)
+    print("─" * 125)
 
     for q in quotas:
         name = q["name"]
@@ -104,20 +106,26 @@ def print_quota_table(quotas: List[Dict[str, Any]]):
         else:
             status_color = f"{DIM}{status}{RESET}"
 
-        bar_5h = render_progress_bar(q.get("gemini_5h"))
-        bar_wk = render_progress_bar(q.get("gemini_weekly"))
-        reset_time = q.get("reset_5h") or q.get("reset_weekly") or "─"
+        bar_5h = render_progress_bar(q.get("gemini_5h"), width=10)
+        reset_5h = q.get("reset_5h") or "─"
+
+        bar_wk = render_progress_bar(q.get("gemini_weekly"), width=10)
+        reset_wk = q.get("reset_weekly") or "─"
+
+        bar_claude = render_progress_bar(q.get("claude_weekly"), width=10)
 
         row = (
-            f"{pad(name_display, 20)} "
-            f"{pad(status_color, 20)} "
-            f"{pad(bar_5h, 22)} "
-            f"{pad(bar_wk, 22)} "
-            f"{pad(reset_time, 18)}"
+            f"{pad(name_display, 18)} "
+            f"{pad(status_color, 18)} "
+            f"{pad(bar_5h, 20)} "
+            f"{pad(reset_5h, 12)} "
+            f"{pad(bar_wk, 20)} "
+            f"{pad(reset_wk, 14)} "
+            f"{pad(bar_claude, 20)}"
         )
         print(row)
 
-    print("─" * 105)
+    print("─" * 125)
     print(f"{DIM}Ghi chú: [★] là tài khoản đang active. Dùng 'agy-mgr quota -r' để quét live toàn bộ.{RESET}\n")
 
 
