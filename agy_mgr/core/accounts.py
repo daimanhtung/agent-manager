@@ -1,10 +1,12 @@
-import json
-import shutil
 import base64
+import json
+import os
+import shutil
+import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, List, Any
+from typing import Any, Dict, List, Optional
 
 from agy_mgr.config import (
     GEMINI_HOME,
@@ -127,6 +129,50 @@ def get_account_cooldown(name: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def get_from_macos_keychain() -> Optional[Dict[str, Any]]:
+    """Read token dict from macOS Keychain (service: gemini, account: antigravity)."""
+    try:
+        raw = subprocess.check_output(
+            ["security", "find-generic-password", "-s", "gemini", "-a", "antigravity", "-w"],
+            text=True, stderr=subprocess.DEVNULL
+        ).strip()
+        if raw.startswith("go-keyring-base64:"):
+            b64 = raw.split("go-keyring-base64:")[1]
+            return json.loads(base64.b64decode(b64).decode())
+    except Exception:
+        pass
+    return None
+
+
+def sync_to_macos_keychain(token_dict: Dict[str, Any]) -> bool:
+    """Update macOS Keychain (service: gemini, account: antigravity) with given token dict."""
+    try:
+        raw_json = json.dumps(token_dict)
+        b64 = base64.b64encode(raw_json.encode()).decode()
+        payload = f"go-keyring-base64:{b64}"
+        subprocess.run([
+            "security", "add-generic-password", "-U",
+            "-s", "gemini",
+            "-a", "antigravity",
+            "-w", payload
+        ], capture_output=True, check=True)
+        return True
+    except Exception:
+        return False
+
+
+def delete_from_macos_keychain() -> bool:
+    """Delete entry from macOS Keychain."""
+    try:
+        subprocess.run(
+            ["security", "delete-generic-password", "-s", "gemini", "-a", "antigravity"],
+            capture_output=True, check=True
+        )
+        return True
+    except Exception:
+        return False
+
+
 def save_profile(name: str, gemini_dir: Path = GEMINI_HOME, metadata_extra: Optional[Dict] = None) -> Path:
     """Save credentials from gemini_dir into profiles/<name>."""
     target_dir = PROFILES_DIR / name
@@ -148,6 +194,12 @@ def save_profile(name: str, gemini_dir: Path = GEMINI_HOME, metadata_extra: Opti
         f_cli.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(f_standalone, f_cli)
 
+    # Backup macOS Keychain token if available
+    kc_tok = get_from_macos_keychain()
+    if kc_tok:
+        with open(target_dir / "keychain_token.json", "w", encoding="utf-8") as f:
+            json.dump(kc_tok, f, indent=2)
+
     meta_file = target_dir / "meta.json"
     existing_meta = {}
     if meta_file.exists():
@@ -158,6 +210,8 @@ def save_profile(name: str, gemini_dir: Path = GEMINI_HOME, metadata_extra: Opti
             pass
 
     email = (metadata_extra or {}).get("email") or existing_meta.get("email")
+    if (not email or email == "unknown@user") and kc_tok and kc_tok.get("id_token"):
+        email = decode_jwt_email(kc_tok["id_token"])
     if not email or email == "unknown@user":
         email = extract_email_from_gemini_dir(target_dir)
 
@@ -179,7 +233,7 @@ def save_profile(name: str, gemini_dir: Path = GEMINI_HOME, metadata_extra: Opti
 
 
 def load_profile(name: str, gemini_dir: Path = GEMINI_HOME) -> bool:
-    """Restore credentials from profiles/<name> into gemini_dir."""
+    """Restore credentials from profiles/<name> into gemini_dir and macOS Keychain."""
     src_dir = PROFILES_DIR / name
     if not src_dir.exists():
         return False
@@ -200,6 +254,31 @@ def load_profile(name: str, gemini_dir: Path = GEMINI_HOME) -> bool:
         f_cli.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(f_standalone, f_cli)
 
+    # Synchronize to macOS Keychain so agy permanently respects this account!
+    kc_file = src_dir / "keychain_token.json"
+    token_to_sync = None
+    if kc_file.exists():
+        try:
+            with open(kc_file, "r", encoding="utf-8") as f:
+                token_to_sync = json.load(f)
+        except Exception:
+            pass
+
+    if not token_to_sync:
+        # Generate from token file on disk
+        for p in [f_standalone, f_cli]:
+            if p.exists():
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        token_to_sync = json.load(f)
+                        if token_to_sync:
+                            break
+                except Exception:
+                    pass
+
+    if token_to_sync:
+        sync_to_macos_keychain(token_to_sync)
+
     # Update google_accounts.json
     email = extract_email_from_gemini_dir(gemini_dir)
     if email and email != "unknown@user":
@@ -209,6 +288,18 @@ def load_profile(name: str, gemini_dir: Path = GEMINI_HOME) -> bool:
                 json.dump({"active": email, "old": []}, f, indent=2)
         except Exception:
             pass
+
+        # Update Antigravity Desktop App storage if present
+        app_storage_file = Path.home() / "Library" / "Application Support" / "Antigravity" / "app_storage.json"
+        if app_storage_file.exists():
+            try:
+                with open(app_storage_file, "r", encoding="utf-8") as f:
+                    app_data = json.load(f)
+                app_data["jetski.onboarding.lastLoginUsername"] = email
+                with open(app_storage_file, "w", encoding="utf-8") as f:
+                    json.dump(app_data, f, indent=2)
+            except Exception:
+                pass
 
     set_active_account_name(name)
     return True
