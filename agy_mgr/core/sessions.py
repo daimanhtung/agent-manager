@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sqlite3
 import subprocess
 from datetime import datetime, timezone
@@ -163,14 +164,125 @@ def list_all_sessions(limit: int = 25, filter_workspace: Optional[str] = None, s
     return sessions[:limit]
 
 
-def resume_session(conversation_id: Optional[str] = None):
+def find_transcript_file(conversation_id: str) -> Optional[Path]:
+    """Find transcript.jsonl path for a given conversation_id (supports full UUID or prefix)."""
+    bases = [
+        Path.home() / ".gemini" / "antigravity" / "brain",
+        Path.home() / ".gemini" / "antigravity-cli" / "brain",
+    ]
+    # Exact match first
+    for base in bases:
+        exact = base / conversation_id / ".system_generated" / "logs" / "transcript.jsonl"
+        if exact.exists():
+            return exact
+
+    # Prefix match (e.g. 8-char short ID)
+    for base in bases:
+        if base.exists():
+            for d in base.iterdir():
+                if d.is_dir() and d.name.startswith(conversation_id):
+                    cand = d / ".system_generated" / "logs" / "transcript.jsonl"
+                    if cand.exists():
+                        return cand
+    return None
+
+
+def read_session_turns(conversation_id: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Parse readable conversation turns from transcript.jsonl."""
+    p = find_transcript_file(conversation_id)
+    if not p:
+        return []
+
+    turns = []
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                    src = d.get("source")
+                    stype = d.get("type")
+                    content = d.get("content") or ""
+                    ts = d.get("created_at")
+
+                    if stype == "USER_INPUT" and src == "USER_EXPLICIT":
+                        clean = re.sub(r'<USER_REQUEST>\n?', '', content)
+                        clean = re.sub(r'</USER_REQUEST>.*', '', clean, flags=re.DOTALL).strip()
+                        if clean:
+                            turns.append({
+                                "role": "USER",
+                                "content": clean,
+                                "timestamp": ts
+                            })
+                    elif stype == "PLANNER_RESPONSE" and src == "MODEL" and content:
+                        turns.append({
+                            "role": "AI",
+                            "content": content.strip(),
+                            "timestamp": ts
+                        })
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    if limit and len(turns) > limit:
+        return turns[-limit:]
+    return turns
+
+
+def print_session_log(conversation_id: str, limit: Optional[int] = None):
+    """Print readable formatted chat log of a session."""
+    turns = read_session_turns(conversation_id, limit=limit)
+    if not turns:
+        print(f"[!] Không tìm thấy dữ liệu hội thoại trong brain của session: {conversation_id}")
+        return
+
+    from agy_mgr.ui.formatters import BOLD, GREEN, CYAN, RESET, DIM
+
+    title_suffix = f"({limit} lượt gần nhất)" if limit else "(Toàn bộ)"
+    print(f"\n{BOLD}{CYAN}=== LỊCH SỬ HỘI THOẠI SESSION: {conversation_id[:8]} {title_suffix} ==={RESET}\n")
+
+    for t in turns:
+        role = t["role"]
+        ts = t.get("timestamp") or ""
+        ts_str = ""
+        if ts:
+            try:
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone()
+                ts_str = dt.strftime("%d/%m %H:%M")
+            except Exception:
+                ts_str = ts
+
+        if role == "USER":
+            print(f"{BOLD}{GREEN}👤 Người dùng [{ts_str}]:{RESET}")
+            for l in t["content"].splitlines():
+                print(f"   {l}")
+        else:
+            print(f"{BOLD}{CYAN}🤖 Antigravity [{ts_str}]:{RESET}")
+            for l in t["content"].splitlines():
+                print(f"   {l}")
+        print()
+
+    print(f"{DIM}─" * 80 + f"{RESET}\n")
+
+
+def resume_session(conversation_id: Optional[str] = None, show_log: bool = True, log_limit: int = 3):
     """
     Resume session directly by handing over the terminal to `agy`.
-    If conversation_id is provided, calls `agy --conversation <id>`.
-    Otherwise calls `agy -c` (most recent).
+    If show_log is True, displays the last log_limit conversation turns before entering.
     """
+    full_id = conversation_id
     if conversation_id:
-        cmd = [AGY_BIN, "--conversation", conversation_id]
+        p = find_transcript_file(conversation_id)
+        if p:
+            full_id = p.parent.parent.parent.name
+        if show_log:
+            print_session_log(full_id, limit=log_limit)
+
+    if full_id:
+        cmd = [AGY_BIN, "--conversation", full_id]
     else:
         cmd = [AGY_BIN, "-c"]
 

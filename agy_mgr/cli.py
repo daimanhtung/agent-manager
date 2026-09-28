@@ -13,7 +13,7 @@ from agy_mgr.core.accounts import (
 )
 from agy_mgr.core.auth_flow import add_account_via_cli
 from agy_mgr.core.quota import get_all_accounts_quota
-from agy_mgr.core.sessions import list_all_sessions, resume_session
+from agy_mgr.core.sessions import list_all_sessions, resume_session, print_session_log
 from agy_mgr.core.app_launcher import launch_app_instance, list_app_profiles
 from agy_mgr.core.runner import run_with_smart_failover
 from agy_mgr.ui.formatters import (
@@ -101,8 +101,31 @@ def cmd_resume(args):
             return
         session_id = sessions[selected_idx]["id"]
 
+    show_log = not getattr(args, "no_log", False)
+    log_limit = getattr(args, "log_turns", 3)
     print(f"\n[*] Đang tiếp tục session: {CYAN}{session_id}{RESET} với agy...\n")
-    resume_session(session_id)
+    resume_session(session_id, show_log=show_log, log_limit=log_limit)
+
+
+def cmd_log(args):
+    session_id = args.id
+    if not session_id:
+        sessions = list_all_sessions(limit=15)
+        if not sessions:
+            print("Chưa có session nào được ghi nhận.")
+            return
+
+        options = [
+            f"{s['id'][:8]} | [{s['workspace'] or 'Global'}] {s['title']} ({s['modified_str']})"
+            for s in sessions
+        ]
+        selected_idx = prompt_select_option(options, prompt="Chọn session muốn xem lịch sử chat:")
+        if selected_idx < 0:
+            return
+        session_id = sessions[selected_idx]["id"]
+
+    limit = None if getattr(args, "limit", 10) <= 0 else args.limit
+    print_session_log(session_id, limit=limit)
 
 
 def cmd_add(args):
@@ -216,9 +239,17 @@ def main():
     p_sess.set_defaults(func=cmd_sessions)
 
     # resume
-    p_res = subparsers.add_parser("resume", aliases=["r"], help="Tiếp tục (resume) session")
+    p_res = subparsers.add_parser("resume", aliases=["r"], help="Tiếp tục (resume) session và xem lại ngữ cảnh cũ")
     p_res.add_argument("id", nargs="?", help="ID session (nếu để trống sẽ hiển thị menu chọn)")
+    p_res.add_argument("--no-log", action="store_true", help="Không in lại lịch sử trước khi vào")
+    p_res.add_argument("--log-turns", "-n", type=int, default=3, help="Số lượt hội thoại cũ in ra xem lại trước khi vào (mặc định: 3)")
     p_res.set_defaults(func=cmd_resume)
+
+    # log / view
+    p_log = subparsers.add_parser("log", aliases=["view", "show"], help="Xem lại lịch sử hội thoại (transcript) của session")
+    p_log.add_argument("id", nargs="?", help="ID session (nếu để trống sẽ hiển thị menu chọn)")
+    p_log.add_argument("--limit", "-n", type=int, default=10, help="Số lượt hội thoại muốn xem (mặc định: 10, 0 = toàn bộ)")
+    p_log.set_defaults(func=cmd_log)
 
     # add
     p_add = subparsers.add_parser("add", help="Thêm tài khoản Google mới")
