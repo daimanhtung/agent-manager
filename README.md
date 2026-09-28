@@ -27,15 +27,24 @@ Bộ công cụ mạnh mẽ và tiện lợi giúp quản trị đa tài khoản
 
 ---
 
-## 🚀 Cài Đặt & Khởi Tạo
+## 🚀 Cài Đặt Nhanh 1 Dòng (Dành cho máy mới)
 
-Các lệnh `agy-mgr` và `agy-run` đã được liên kết trực tiếp vào `~/.local/bin/` (đã nằm trong `$PATH` của bạn).
+Chỉ cần chạy lệnh bash sau trên bất kỳ máy nào (macOS / Linux):
 
-Bạn có thể gọi ngay ở bất kỳ terminal nào:
 ```bash
-agy-mgr --help
-agy-run --help
+curl -fsSL https://raw.githubusercontent.com/daimanhtung/agent-manager/main/install.sh | bash
 ```
+
+Hoặc nếu đã clone mã nguồn về máy:
+```bash
+./install.sh
+```
+
+Lệnh cài đặt sẽ:
+1. Tự động kiểm tra môi trường Python 3.
+2. Tải và liên kết các lệnh `agy-mgr` và `agy-run` vào `~/.local/bin/`.
+3. Tự động cấu hình `PATH` trong file shell (`.zshrc` hoặc `.bashrc`).
+4. Khởi tạo và nhận diện tài khoản hiện có.
 
 ---
 
