@@ -118,38 +118,88 @@ def format_reset_time(iso_str: Optional[str]) -> str:
         return iso_str
 
 
+def fetch_quota_isolated_for_profile(profile_name: str) -> Optional[Dict[str, Any]]:
+    """
+    Query exact live quota for any profile independently in an isolated sandbox.
+    Does not touch active user, macOS Keychain, or Desktop App.
+    """
+    from agy_mgr.config import PROFILES_DIR
+    import socket
+    import tempfile
+    import shutil
+    from pathlib import Path
+
+    src_profile = PROFILES_DIR / profile_name
+    if not src_profile.exists():
+        return None
+
+    temp_dir = Path(tempfile.mkdtemp(prefix=f"agy_quota_{profile_name}_"))
+    try:
+        temp_gemini = temp_dir / ".gemini"
+        shutil.copytree(src_profile, temp_gemini)
+
+        # Find an available local port
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(('127.0.0.1', 0))
+            free_port = s.getsockname()[1]
+
+        csrf = f"csrf-{profile_name}-{int(time.time())}"
+        env = os.environ.copy()
+        env["HOME"] = str(temp_dir)
+
+        cmd = [
+            "/Applications/Antigravity.app/Contents/Resources/bin/language_server",
+            "--standalone",
+            "--csrf_token", csrf,
+            "--cloud_code_endpoint", "https://daily-cloudcode-pa.googleapis.com",
+            "--http_server_port", str(free_port),
+            "--https_server_port", "0"
+        ]
+
+        proc = subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            url = f"http://127.0.0.1:{free_port}/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
+            req = urllib.request.Request(
+                url,
+                data=b"{}",
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Codeium-Csrf-Token": csrf
+                }
+            )
+            for _ in range(20):
+                time.sleep(0.2)
+                try:
+                    with urllib.request.urlopen(req, timeout=1.5) as resp:
+                        data = json.loads(resp.read().decode())
+                        return parse_quota_response(data)
+                except Exception:
+                    continue
+        finally:
+            proc.kill()
+    except Exception:
+        pass
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+    return None
+
+
 def get_all_accounts_quota(refresh_all: bool = False) -> List[Dict[str, Any]]:
-    """Retrieve quota for all registered accounts, using live query for active and cache for standby."""
-    from agy_mgr.core.accounts import get_state, save_state, switch_account
+    """Retrieve quota for all registered accounts, using isolated query per profile for true independent quota."""
+    from agy_mgr.core.accounts import get_state, save_state
 
     accounts = list_accounts()
     active_name = get_active_account_name()
     state = get_state()
     cached_quotas = state.get("cached_quotas", {})
 
-    # If refresh_all requested, cycle through each account to get fresh live quota
-    if refresh_all and len(accounts) > 1:
-        orig_active = active_name
+    # If refresh_all is requested, fetch live quota for each account independently
+    if refresh_all:
         for acc in accounts:
-            a_name = acc["name"]
-            switch_account(a_name)
-            time.sleep(1.0)
-            ls_info = find_running_language_server()
-            if ls_info:
-                q = fetch_quota_from_ls(ls_info)
-                if q:
-                    cached_quotas[a_name] = q
-        if orig_active:
-            switch_account(orig_active)
-        state["cached_quotas"] = cached_quotas
-        save_state(state)
-
-    ls_info = find_running_language_server()
-    live_quota = fetch_quota_from_ls(ls_info) if ls_info else None
-
-    # Update cache for current active account if live quota obtained
-    if active_name and live_quota:
-        cached_quotas[active_name] = live_quota
+            name = acc["name"]
+            q = fetch_quota_isolated_for_profile(name)
+            if q:
+                cached_quotas[name] = q
         state["cached_quotas"] = cached_quotas
         save_state(state)
 
@@ -169,30 +219,45 @@ def get_all_accounts_quota(refresh_all: bool = False) -> List[Dict[str, Any]]:
             "status": "Ready"
         }
 
+        # Check cooldown first
         if acc.get("cooldown"):
             cd = acc["cooldown"]
             until = cd.get("until", 0)
             remaining_mins = max(0, int((until - time.time()) / 60))
             item["status"] = f"Cooldown ({remaining_mins}m)"
-        elif item["is_active"] and live_quota:
-            item["gemini_5h"] = live_quota.get("gemini_5h_fraction")
-            item["gemini_weekly"] = live_quota.get("gemini_weekly_fraction")
-            item["claude_weekly"] = live_quota.get("claude_weekly_fraction")
-            item["reset_5h"] = format_reset_time(live_quota.get("gemini_5h_reset"))
-            item["reset_weekly"] = format_reset_time(live_quota.get("gemini_weekly_reset"))
+            result.append(item)
+            continue
+
+        q = None
+        # For active account (when not refresh_all), or if account not yet in cache, fetch it
+        if item["is_active"] and not refresh_all:
+            q = fetch_quota_isolated_for_profile(name)
+            if q:
+                cached_quotas[name] = q
+                state["cached_quotas"] = cached_quotas
+                save_state(state)
+        elif name in cached_quotas:
+            q = cached_quotas[name]
+        else:
+            # First time seeing this account, fetch it
+            q = fetch_quota_isolated_for_profile(name)
+            if q:
+                cached_quotas[name] = q
+                state["cached_quotas"] = cached_quotas
+                save_state(state)
+
+        if q:
+            item["gemini_5h"] = q.get("gemini_5h_fraction")
+            item["gemini_weekly"] = q.get("gemini_weekly_fraction")
+            item["claude_weekly"] = q.get("claude_weekly_fraction")
+            item["reset_5h"] = format_reset_time(q.get("gemini_5h_reset"))
+            item["reset_weekly"] = format_reset_time(q.get("gemini_weekly_reset"))
             if item["gemini_5h"] == 0 or item["gemini_weekly"] == 0:
                 item["status"] = "Exhausted"
-            else:
+            elif item["is_active"]:
                 item["status"] = "Active (Live)"
-        elif name in cached_quotas:
-            # Use cached quota for standby account
-            c_q = cached_quotas[name]
-            item["gemini_5h"] = c_q.get("gemini_5h_fraction")
-            item["gemini_weekly"] = c_q.get("gemini_weekly_fraction")
-            item["claude_weekly"] = c_q.get("claude_weekly_fraction")
-            item["reset_5h"] = format_reset_time(c_q.get("gemini_5h_reset"))
-            item["reset_weekly"] = format_reset_time(c_q.get("gemini_weekly_reset"))
-            item["status"] = "Standby (Cached)"
+            else:
+                item["status"] = "Standby (Cached)"
         else:
             item["status"] = "Standby (Available)"
 

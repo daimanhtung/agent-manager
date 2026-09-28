@@ -199,6 +199,12 @@ def save_profile(name: str, gemini_dir: Path = GEMINI_HOME, metadata_extra: Opti
     if kc_tok:
         with open(target_dir / "keychain_token.json", "w", encoding="utf-8") as f:
             json.dump(kc_tok, f, indent=2)
+        # Ensure token files on disk also match keychain_token
+        with open(f_standalone, "w", encoding="utf-8") as f:
+            json.dump(kc_tok, f, indent=2)
+        f_cli.parent.mkdir(parents=True, exist_ok=True)
+        with open(f_cli, "w", encoding="utf-8") as f:
+            json.dump(kc_tok, f, indent=2)
 
     meta_file = target_dir / "meta.json"
     existing_meta = {}
