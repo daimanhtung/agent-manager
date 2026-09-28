@@ -1,0 +1,31 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS artifacts
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+Thumbs.db
+
+# Virtual environments
+.venv/
+env/
+venv/
+ENV/
+
+# Local state and credentials (MUST NOT BE COMMITTED)
+.agy-manager/
+state.json
+active.json
+*.token
+*.pb
+*.log
+
+# Editor configs
+.vscode/
+.idea/
+*.swp
+*.swo
