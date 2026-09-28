@@ -1,5 +1,6 @@
 import argparse
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import List
@@ -210,6 +211,19 @@ def cmd_completion(args):
         print(get_completion_script(shell))
 
 
+def cmd_update(args):
+    repo_dir = Path(__file__).resolve().parent.parent
+    print(f"\n[*] Đang cập nhật agy-mgr từ GitHub...")
+    if (repo_dir / ".git").exists():
+        res = subprocess.call(["git", "-C", str(repo_dir), "pull"])
+        if res == 0:
+            print(f"\n{GREEN}[✓] Cập nhật thành công agy-mgr lên phiên bản mới nhất!{RESET}\n")
+            return
+
+    # Fallback to curl installer
+    subprocess.call("curl -fsSL https://raw.githubusercontent.com/daimanhtung/agent-manager/main/install.sh | bash", shell=True)
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="agy-mgr",
@@ -280,6 +294,10 @@ def main():
     p_comp.add_argument("shell", nargs="?", choices=["zsh", "bash"], help="Loại shell (zsh hoặc bash)")
     p_comp.add_argument("--install", "-i", action="store_true", help="Tự động cài đặt cấu hình vào .zshrc hoặc .bashrc")
     p_comp.set_defaults(func=cmd_completion)
+
+    # update
+    p_up = subparsers.add_parser("update", aliases=["up"], help="Cập nhật agy-mgr lên phiên bản mới nhất từ GitHub")
+    p_up.set_defaults(func=cmd_update)
 
     args = parser.parse_args()
     if hasattr(args, "func"):
