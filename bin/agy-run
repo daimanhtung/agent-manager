@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-export PYTHONPATH="$SCRIPT_DIR:$PYTHONPATH"
+# Resolve symlinks to find the real source directory
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+ROOT_DIR="$(cd -P "$(dirname "$SOURCE")/.." >/dev/null 2>&1 && pwd)"
+
+export PYTHONPATH="$ROOT_DIR:$PYTHONPATH"
 exec python3 -c "from agy_mgr.cli import run_cli_wrapper; run_cli_wrapper()" "$@"
