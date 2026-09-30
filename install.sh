@@ -61,6 +61,22 @@ ln -sf "$TARGET_DIR/bin/agy-mgr" "$BIN_DIR/agy-mgr"
 ln -sf "$TARGET_DIR/bin/agy-run" "$BIN_DIR/agy-run"
 echo -e "${GREEN}[+] Đã liên kết lệnh: ${BIN_DIR}/agy-mgr & ${BIN_DIR}/agy-run${RESET}"
 
+# 3b. Auto-detect AGY_SYNC_DIR if TARGET_DIR is outside a Syncthing-watched folder
+# This ensures 'agy-mgr sync push' writes to a folder that Syncthing can sync
+DETECTED_SYNC_DIR=""
+# Look for an agent-manager repo inside common project folders that Syncthing watches
+for candidate_repo in \
+    "$HOME/Project/MyProject/agent-manager" \
+    "$HOME/Projects/MyProject/agent-manager" \
+    "$HOME/Documents/MyProject/agent-manager" \
+    "$HOME/workspace/agent-manager"; do
+    if [ -f "$candidate_repo/agy_mgr/cli.py" ] && [ "$candidate_repo" != "$TARGET_DIR" ]; then
+        DETECTED_SYNC_DIR="$candidate_repo/synced_sessions"
+        echo -e "${CYAN}[*] Phát hiện Syncthing repo tại: ${candidate_repo}${RESET}"
+        break
+    fi
+done
+
 # 4. Ensure ~/.local/bin is in PATH
 SHELL_CONFIG=""
 if [ -n "$ZSH_VERSION" ] || [ "$SHELL" = "/bin/zsh" ] || [ "$SHELL" = "/usr/bin/zsh" ]; then
@@ -75,6 +91,18 @@ if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
     echo -e "${YELLOW}[*] Đang thêm ${BIN_DIR} vào PATH trong ${SHELL_CONFIG}...${RESET}"
     echo -e '\n# Antigravity Manager PATH\nexport PATH="$HOME/.local/bin:$PATH"' >> "$SHELL_CONFIG"
     export PATH="$BIN_DIR:$PATH"
+fi
+
+# 4b. Write AGY_SYNC_DIR to shell config if we detected a Syncthing-watched repo
+if [ -n "$DETECTED_SYNC_DIR" ]; then
+    if ! grep -q "AGY_SYNC_DIR" "$SHELL_CONFIG" 2>/dev/null; then
+        echo -e "${CYAN}[*] Ghi AGY_SYNC_DIR vào ${SHELL_CONFIG} để sync qua Syncthing...${RESET}"
+        echo -e "\n# agy-mgr: trỏ synced_sessions vào folder được Syncthing watch\nexport AGY_SYNC_DIR=\"$DETECTED_SYNC_DIR\"" >> "$SHELL_CONFIG"
+        export AGY_SYNC_DIR="$DETECTED_SYNC_DIR"
+        echo -e "${GREEN}[+] AGY_SYNC_DIR=${DETECTED_SYNC_DIR}${RESET}"
+    else
+        echo -e "${YELLOW}[~] AGY_SYNC_DIR đã được cấu hình trong ${SHELL_CONFIG}, bỏ qua.${RESET}"
+    fi
 fi
 
 # 5. Initialize active profile & shell completion
