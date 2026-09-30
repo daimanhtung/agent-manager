@@ -89,10 +89,14 @@ def add_account_via_cli(name: str) -> bool:
         has_files = any((GEMINI_HOME / p).exists() for p in AUTH_FILES)
 
         if (new_kc or has_files) and (new_email and new_email != "unknown@user"):
+            if name.lower() not in new_email.lower().split("@")[0] and not new_email.lower().startswith(name.lower()):
+                print(f"\n[!] Lưu ý: Bạn vừa đăng nhập Google bằng email: {new_email}")
+                print(f"    (Tên profile chỉ định: '{name}')")
+
             print(f"\n[✓] Đăng nhập thành công tài khoản: {new_email}")
             save_profile(name, gemini_dir=GEMINI_HOME, metadata_extra={"email": new_email})
             set_active_account_name(name)
-            print(f"[✓] Đã lưu profile '{name}' và đặt làm tài khoản Active!")
+            print(f"[✓] Đã lưu profile '{name}' ({new_email}) và đặt làm tài khoản Active!")
             shutil.rmtree(backup_dir, ignore_errors=True)
             return True
         else:

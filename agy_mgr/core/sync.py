@@ -239,9 +239,9 @@ def patch_protobuf_blob(
         return blob
 
 
-def patch_conversation_db(cid: str, new_uri: Optional[str] = None):
+def patch_conversation_db(cid: str, new_uri: Optional[str] = None, new_pid: Optional[str] = None):
     """Patch trajectory_metadata_blob inside local conversation SQLite DB."""
-    if not new_uri:
+    if not new_uri and not new_pid:
         return
     for base_dir in [GEMINI_HOME / "antigravity", GEMINI_HOME / "antigravity-cli"]:
         conv_file = base_dir / "conversations" / f"{cid}.db"
@@ -256,14 +256,58 @@ def patch_conversation_db(cid: str, new_uri: Optional[str] = None):
                 rows = cur.fetchall()
                 for row_id, blob in rows:
                     if blob:
-                        patched = patch_protobuf_blob(blob, new_uri=new_uri)
-                        if patched and patched != blob:
+                        btree = decode_proto(blob)
+                        breps = []
+                        if new_uri:
+                            buris = find_proto_uris(btree)
+                            target_uri_b = new_uri.encode("utf-8")
+                            for u in buris:
+                                if u != target_uri_b:
+                                    breps.append((u, target_uri_b))
+                        if new_pid:
+                            target_pid_b = new_pid.encode("utf-8")
+                            for tag, wire, val in btree:
+                                if tag == 18 and wire == 2 and isinstance(val, (bytes, bytearray)):
+                                    if bytes(val) != target_pid_b:
+                                        breps.append((bytes(val), target_pid_b))
+                        if breps:
+                            patched = encode_proto(replace_in_proto_tree(btree, breps))
                             cur.execute("UPDATE trajectory_metadata_blob SET data = ? WHERE id = ?", (patched, row_id))
                 conn.commit()
                 conn.execute("PRAGMA wal_checkpoint(PASSIVE);")
             conn.close()
         except Exception:
             pass
+
+
+def patch_agyhub_summaries_pb(projects_map: Dict[str, Dict[str, Any]]):
+    """Patch agyhub_summaries_proto.pb to map all foreign URIs and project IDs to local ones."""
+    pb_file = GEMINI_HOME / "antigravity" / "agyhub_summaries_proto.pb"
+    if not pb_file.exists():
+        return
+    try:
+        pb_data = pb_file.read_bytes()
+        pbtree = decode_proto(pb_data)
+        puris = find_proto_uris(pbtree)
+        pbreps = []
+        for u in puris:
+            u_str = u.decode("utf-8", errors="ignore")
+            fname = Path(u_str.replace("file://", "")).name.lower()
+            if fname in projects_map:
+                turi = projects_map[fname].get("folderUri")
+                if turi and u != turi.encode("utf-8"):
+                    pbreps.append((u, turi.encode("utf-8")))
+
+        if "devops" in projects_map:
+            devops_pid = projects_map["devops"]["id"]
+            if b"72969541-f821-4f8f-85e5-d29878f9ad82" in pb_data:
+                pbreps.append((b"72969541-f821-4f8f-85e5-d29878f9ad82", devops_pid.encode("utf-8")))
+
+        if pbreps:
+            npb = encode_proto(replace_in_proto_tree(pbtree, pbreps))
+            pb_file.write_bytes(npb)
+    except Exception:
+        pass
 
 
 def find_local_brain_dir(conversation_id: str, app_data_dir: Optional[str] = None) -> Optional[Path]:
@@ -669,8 +713,8 @@ def deduplicate_and_relink_projects() -> Dict[str, Any]:
                 if new_raw != raw_blob:
                     need_update = True
 
-                if target_uri:
-                    patch_conversation_db(cid, new_uri=target_uri)
+                if target_uri or target_pid:
+                    patch_conversation_db(cid, new_uri=target_uri, new_pid=target_pid)
 
                 if need_update:
                     cur.execute(
@@ -684,6 +728,9 @@ def deduplicate_and_relink_projects() -> Dict[str, Any]:
             conn.close()
         except Exception:
             pass
+
+    # 4. Patch agyhub_summaries_proto.pb if present
+    patch_agyhub_summaries_pb(projects_map)
 
     return {
         "duplicates_removed": duplicates_removed,

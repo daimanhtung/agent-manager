@@ -215,11 +215,14 @@ def save_profile(name: str, gemini_dir: Path = GEMINI_HOME, metadata_extra: Opti
         except Exception:
             pass
 
-    email = (metadata_extra or {}).get("email") or existing_meta.get("email")
-    if (not email or email == "unknown@user") and kc_tok and kc_tok.get("id_token"):
-        email = decode_jwt_email(kc_tok["id_token"])
-    if not email or email == "unknown@user":
-        email = extract_email_from_gemini_dir(target_dir)
+    # Extract real email directly from token
+    real_email = None
+    if kc_tok and kc_tok.get("id_token"):
+        real_email = decode_jwt_email(kc_tok["id_token"])
+    if not real_email or real_email == "unknown@user":
+        real_email = extract_email_from_gemini_dir(target_dir)
+
+    email = (metadata_extra or {}).get("email") or real_email or existing_meta.get("email") or "unknown@user"
 
     meta = {
         "name": name,
@@ -228,7 +231,9 @@ def save_profile(name: str, gemini_dir: Path = GEMINI_HOME, metadata_extra: Opti
         "type": "oauth"
     }
     if existing_meta:
-        meta.update({k: v for k, v in existing_meta.items() if k not in ["saved_at"]})
+        for k, v in existing_meta.items():
+            if k not in ["saved_at", "email"]:
+                meta[k] = v
     if metadata_extra:
         meta.update(metadata_extra)
 
@@ -354,7 +359,32 @@ def switch_account(target_name: str) -> bool:
     """
     current_active = get_active_account_name()
     if current_active and (PROFILES_DIR / current_active).exists():
-        save_profile(current_active)
+        # Validate that credentials in GEMINI_HOME actually belong to current_active!
+        current_email = extract_email_from_gemini_dir(GEMINI_HOME)
+        profile_meta_file = PROFILES_DIR / current_active / "meta.json"
+        profile_email = None
+        if profile_meta_file.exists():
+            try:
+                profile_email = json.loads(profile_meta_file.read_text()).get("email")
+            except Exception:
+                pass
+
+        if current_email and profile_email and current_email != profile_email and current_email != "unknown@user":
+            # Credentials in GEMINI_HOME belong to a different account, find matching profile to backup into!
+            matching_prof = None
+            for p in PROFILES_DIR.iterdir():
+                if p.is_dir() and (p / "meta.json").exists():
+                    try:
+                        d = json.loads((p / "meta.json").read_text())
+                        if d.get("email") == current_email:
+                            matching_prof = p.name
+                            break
+                    except Exception:
+                        pass
+            if matching_prof:
+                save_profile(matching_prof, gemini_dir=GEMINI_HOME)
+        else:
+            save_profile(current_active, gemini_dir=GEMINI_HOME)
 
     if not load_profile(target_name):
         return False
