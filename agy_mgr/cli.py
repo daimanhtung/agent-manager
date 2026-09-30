@@ -245,16 +245,26 @@ def cmd_sync(args):
         print(f"{GREEN}[✓] Hoàn tất:{RESET} {BOLD}{res['imported']}{RESET} session mới, {BOLD}{res['updated']}{RESET} đã cập nhật, {DIM}{res['skipped']}{RESET} bỏ qua.\n")
         return
 
+    if action in ("relink", "repair", "fix"):
+        print(f"\n[*] Đang quét và ánh xạ lại session theo các Project cục bộ trên máy này...")
+        from agy_mgr.core.sync import relink_sessions_to_local_projects
+        res = relink_sessions_to_local_projects()
+        print(f"{GREEN}[✓] Hoàn tất:{RESET} Đã chuẩn hóa và liên kết {BOLD}{res['relinked']}{RESET} lượt session vào đúng Project ID và đường dẫn trên máy này!\n")
+        return
+
     # Default: 2-way sync
     print(f"\n[*] Đang đồng bộ session 2 chiều (Syncthing / Repo)...")
     res = sync_all(limit=limit, force=force)
+    relinked_info = f" | {CYAN}{res.get('relinked', 0)}{RESET} đã ánh xạ project" if res.get('relinked') else ""
     print(
         f"{GREEN}[✓] Đồng bộ thành công:{RESET} "
         f"{BOLD}{res['imported']}{RESET} mới nhập | "
         f"{BOLD}{res['updated']}{RESET} cập nhật | "
-        f"{BOLD}{res['exported']}{RESET} đã xuất | "
+        f"{BOLD}{res['exported']}{RESET} đã xuất"
+        f"{relinked_info} | "
         f"{DIM}{res['skipped']}{RESET} bỏ qua\n"
     )
+
 
 
 def cmd_update(args):
@@ -316,7 +326,7 @@ def main():
 
     # sync
     p_sync = subparsers.add_parser("sync", help="Đồng bộ session giữa các thiết bị (qua Syncthing / Repo)")
-    p_sync.add_argument("sync_action", nargs="?", choices=["push", "export", "pull", "import", "status", "st"], help="Hành động: push (xuất), pull (nhập), status (kiểm tra). Mặc định là đồng bộ 2 chiều")
+    p_sync.add_argument("sync_action", nargs="?", choices=["push", "export", "pull", "import", "status", "st", "relink", "repair", "fix"], help="Hành động: push (xuất), pull (nhập), status (kiểm tra), relink (ánh xạ lại project). Mặc định là đồng bộ 2 chiều")
     p_sync.add_argument("--id", help="Chỉ đồng bộ một session ID cụ thể")
     p_sync.add_argument("--limit", "-n", type=int, default=50, help="Số session gần nhất cần đồng bộ (mặc định: 50)")
     p_sync.add_argument("--force", "-f", action="store_true", help="Ghi đè ngay cả khi bản hiện tại bằng hoặc mới hơn")

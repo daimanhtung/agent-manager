@@ -4,6 +4,7 @@ import os
 import shutil
 import socket
 import sqlite3
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -129,56 +130,220 @@ def copy_brain_tree(src: Path, dst: Path):
                 pass
 
 
-def adapt_workspace_uris_for_local_machine(ws_raw: str) -> str:
+def get_local_projects_map() -> Dict[str, Dict[str, Any]]:
     """
-    Adapt workspace URIs from a remote machine so that Antigravity Desktop App
-    on the current machine matches the workspace and displays the session in the sidebar.
+    Read all local projects from ~/.gemini/config/projects/*.json and ~/.gemini/projects.json.
+    Maps lowercase project names and folder names to project info:
+    {"id": pid, "name": name, "folderUri": folderUri}
+    """
+    projects = {}
+    p_dir = GEMINI_HOME / "config" / "projects"
+    if p_dir.exists():
+        for f in p_dir.glob("*.json"):
+            if f.name in ("outside-of-project.json", "default-cli-project.json"):
+                continue
+            try:
+                d = json.loads(f.read_text(encoding="utf-8"))
+                pid = d.get("id")
+                pname = d.get("name")
+                resources = d.get("projectResources", {}).get("resources", [])
+                furi = None
+                for r in resources:
+                    if "gitFolder" in r and "folderUri" in r["gitFolder"]:
+                        furi = r["gitFolder"]["folderUri"]
+                        break
+                if pid and pname:
+                    entry = {"id": pid, "name": pname, "folderUri": furi}
+                    projects[pname.lower()] = entry
+                if pid and furi:
+                    folder_name = Path(furi.replace("file://", "")).name.lower()
+                    entry = {"id": pid, "name": pname or folder_name, "folderUri": furi}
+                    projects[folder_name] = entry
+            except Exception:
+                pass
+
+    return projects
+
+
+def find_local_workspace_folder(ws_raw: str) -> Optional[Path]:
+    """
+    Given a remote workspace URI, find the corresponding local folder on this machine.
     """
     if not ws_raw:
-        return ws_raw
+        return None
     try:
         uris = json.loads(ws_raw)
-        if not isinstance(uris, list) or not uris:
-            return ws_raw
+        if not uris or not isinstance(uris, list):
+            return None
+        remote_path = Path(uris[0].replace("file://", ""))
+        folder_name = remote_path.name
 
-        adapted_uris = list(uris)
+        # 1. Is it this repository itself?
+        if folder_name.lower() == REPO_DIR.name.lower():
+            return REPO_DIR
+
+        # 2. Check if relative path from home exists on local machine
         home = Path.home()
+        parts = remote_path.parts
+        for i in range(1, len(parts)):
+            subpath = Path(*parts[i:])
+            cand = home / subpath
+            if cand.exists() and cand.is_dir():
+                return cand
 
-        for uri in uris:
-            if not uri.startswith("file://"):
+        # 3. Check common search locations in user's home
+        common_bases = [
+            home / "Project",
+            home / "Projects",
+            home / "Documents",
+            home / "workspace",
+            home / "code",
+            home,
+        ]
+        for base in common_bases:
+            if not base.exists():
                 continue
-            path_str = uri.replace("file://", "")
-            remote_path = Path(path_str)
-            basename = remote_path.name
-
-            # 1. Match current repository (e.g. agent-manager)
-            if basename == REPO_DIR.name:
-                local_repo_uri = REPO_DIR.as_uri()
-                if local_repo_uri not in adapted_uris:
-                    adapted_uris.insert(0, local_repo_uri)
-
-            # 2. Map /Users/<other_user>/... or /home/<other_user>/... directly to local home
-            parts = remote_path.parts
-            if len(parts) >= 3 and parts[1] in ("Users", "home"):
-                rel_to_user = Path(*parts[3:])
-                local_mapped = home / rel_to_user
-                local_mapped_uri = local_mapped.as_uri()
-                if local_mapped_uri not in adapted_uris:
-                    adapted_uris.insert(0, local_mapped_uri)
-
-            # 3. Check if any subpath relative to user home exists locally
-            for i in range(1, len(parts)):
-                subpath = Path(*parts[i:])
-                cand = home / subpath
-                if cand.exists() and cand.is_dir():
-                    cand_uri = cand.as_uri()
-                    if cand_uri not in adapted_uris:
-                        adapted_uris.insert(0, cand_uri)
-                    break
-
-        return json.dumps(adapted_uris)
+            direct = base / folder_name
+            if direct.exists() and direct.is_dir():
+                return direct
+            try:
+                for sub in base.iterdir():
+                    if sub.is_dir():
+                        target = sub / folder_name
+                        if target.exists() and target.is_dir():
+                            return target
+            except Exception:
+                pass
     except Exception:
-        return ws_raw
+        pass
+    return None
+
+
+def ensure_local_project_for_workspace(folder_path: Path) -> Dict[str, Any]:
+    """
+    Ensure a project JSON exists in ~/.gemini/config/projects/ for the given local folder.
+    Returns {"id": pid, "name": name, "folderUri": folderUri}.
+    """
+    p_dir = GEMINI_HOME / "config" / "projects"
+    p_dir.mkdir(parents=True, exist_ok=True)
+
+    folder_uri = folder_path.as_uri()
+    folder_name = folder_path.name
+
+    # Check if project already exists
+    for f in p_dir.glob("*.json"):
+        if f.name in ("outside-of-project.json", "default-cli-project.json"):
+            continue
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+            for r in d.get("projectResources", {}).get("resources", []):
+                if r.get("gitFolder", {}).get("folderUri") == folder_uri:
+                    return {"id": d["id"], "name": d.get("name", folder_name), "folderUri": folder_uri}
+        except Exception:
+            pass
+
+    # Create new project config
+    new_pid = str(uuid.uuid4())
+    proj_config = {
+        "id": new_pid,
+        "name": folder_name,
+        "projectResources": {
+            "resources": [
+                {
+                    "gitFolder": {
+                        "folderUri": folder_uri,
+                        "defaultBranch": "main"
+                    }
+                }
+            ]
+        },
+        "permissionGrants": {
+            "v2Migrated": True
+        },
+        "settings": {},
+        "isWorkspaceOnly": False
+    }
+    target_file = p_dir / f"{new_pid}.json"
+    target_file.write_text(json.dumps(proj_config, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    # Also update ~/.gemini/projects.json
+    p_json = GEMINI_HOME / "projects.json"
+    try:
+        pj_data = {"projects": {}}
+        if p_json.exists():
+            pj_data = json.loads(p_json.read_text(encoding="utf-8"))
+        pj_data.setdefault("projects", {})[str(folder_path)] = folder_name
+        p_json.write_text(json.dumps(pj_data, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+    return {"id": new_pid, "name": folder_name, "folderUri": folder_uri}
+
+
+def relink_sessions_to_local_projects() -> Dict[str, Any]:
+    """
+    Retroactively scan all sessions in local SQLite DBs and ensure their
+    workspace_uris and project_id match the current machine's paths and projects.
+    This guarantees Antigravity Desktop App displays sessions in the matching open workspace.
+    """
+    relinked_count = 0
+    projects_map = get_local_projects_map()
+
+    for db_path in [APP_CONV_DB, CLI_CONV_DB]:
+        if not db_path.exists():
+            continue
+        try:
+            conn = sqlite3.connect(db_path, timeout=10.0)
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("SELECT conversation_id, workspace_uris, project_id, raw_summary FROM conversation_summaries")
+            rows = cur.fetchall()
+
+            for r in rows:
+                cid = r["conversation_id"]
+                ws_raw = r["workspace_uris"]
+                old_pid = r["project_id"] or ""
+                raw_blob = r["raw_summary"]
+
+                local_folder = find_local_workspace_folder(ws_raw)
+                if not local_folder:
+                    continue
+
+                folder_name_lower = local_folder.name.lower()
+                target_proj = projects_map.get(folder_name_lower)
+                if not target_proj or not target_proj.get("id") or not target_proj.get("folderUri"):
+                    target_proj = ensure_local_project_for_workspace(local_folder)
+                    projects_map[folder_name_lower] = target_proj
+
+                target_pid = target_proj["id"]
+                target_uri = target_proj["folderUri"]
+                target_ws_raw = json.dumps([target_uri])
+
+                need_update = False
+                if old_pid != target_pid or ws_raw != target_ws_raw:
+                    need_update = True
+
+                new_raw = raw_blob
+                if raw_blob and old_pid and target_pid and old_pid != target_pid:
+                    if old_pid.encode() in raw_blob:
+                        # 36-character UUID replacement preserves exact protobuf message length
+                        new_raw = raw_blob.replace(old_pid.encode(), target_pid.encode())
+                        need_update = True
+
+                if need_update:
+                    cur.execute(
+                        "UPDATE conversation_summaries SET project_id = ?, workspace_uris = ?, raw_summary = ? WHERE conversation_id = ?",
+                        (target_pid, target_ws_raw, new_raw, cid)
+                    )
+                    relinked_count += 1
+
+            conn.commit()
+            conn.execute("PRAGMA wal_checkpoint(FULL);")
+            conn.close()
+        except Exception:
+            pass
+
+    return {"relinked": relinked_count}
 
 
 def export_sessions(
@@ -294,6 +459,7 @@ def import_sessions(
     """
     Import sessions from the repository sync folder (SYNC_DIR) into the local Antigravity environment.
     Updates SQLite conversation_summaries, conversation.db, annotations, and brain directories.
+    Automatically relinks workspace URIs and project_id to the local machine.
     """
     if not SYNC_DIR.exists():
         return {"imported": 0, "updated": 0, "skipped": 0, "errors": 0}
@@ -303,6 +469,8 @@ def import_sessions(
     # Ensure local DBs exist
     init_db_if_needed(APP_CONV_DB)
     init_db_if_needed(CLI_CONV_DB)
+
+    projects_map = get_local_projects_map()
 
     for entry in SYNC_DIR.iterdir():
         if not entry.is_dir():
@@ -332,27 +500,14 @@ def import_sessions(
                 try:
                     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
                     cur = conn.cursor()
-                    cur.execute("SELECT last_modified_time, raw_summary, workspace_uris FROM conversation_summaries WHERE conversation_id = ?", (cid,))
+                    cur.execute("SELECT last_modified_time FROM conversation_summaries WHERE conversation_id = ?", (cid,))
                     row = cur.fetchone()
                     conn.close()
                     if row:
                         local_exists = True
                         local_dt = parse_sqlite_timestamp(row[0])
                         conv_db_local = find_local_conversation_db(cid)
-                        has_raw = row[1] is not None
-                        local_ws = row[2] or ""
-
-                        remote_has_conv_db = (entry / "conversation.db").exists()
-                        remote_has_raw = bool(meta.get("_raw_summary_b64"))
-                        # Needs workspace adaptation if local_ws doesn't have home.as_uri() yet
-                        needs_ws_update = (Path.home().as_uri() not in local_ws) if ("workspace_uris" in meta) else False
-
-                        if (
-                            local_dt and remote_dt and local_dt >= remote_dt
-                            and (not remote_has_conv_db or conv_db_local)
-                            and (not remote_has_raw or has_raw)
-                            and not needs_ws_update
-                        ):
+                        if local_dt and remote_dt and local_dt >= remote_dt and conv_db_local:
                             local_newer = True
                 except Exception:
                     pass
@@ -370,7 +525,6 @@ def import_sessions(
                         conv_dir.mkdir(parents=True, exist_ok=True)
                         dest_db = conv_dir / f"{cid}.db"
                         shutil.copy2(conv_db_src, dest_db)
-                        # Remove stale WAL/SHM to avoid locking or stale cache
                         (conv_dir / f"{cid}.db-wal").unlink(missing_ok=True)
                         (conv_dir / f"{cid}.db-shm").unlink(missing_ok=True)
 
@@ -383,16 +537,38 @@ def import_sessions(
                         ann_dir.mkdir(parents=True, exist_ok=True)
                         shutil.copy2(ann_src, ann_dir / f"{cid}.pbtxt")
 
-            # 3. Adapt workspace URIs so the local Antigravity App matches the open folder
-            if "workspace_uris" in meta:
-                meta["workspace_uris"] = adapt_workspace_uris_for_local_machine(meta["workspace_uris"])
+            # 3. Match and adapt workspace URI and project_id for local machine
+            ws_raw = meta.get("workspace_uris", "")
+            old_pid = meta.get("project_id", "")
+            raw_bytes = None
+            if "_raw_summary_b64" in meta and meta["_raw_summary_b64"]:
+                try:
+                    raw_bytes = base64.b64decode(meta["_raw_summary_b64"])
+                except Exception:
+                    pass
+
+            local_folder = find_local_workspace_folder(ws_raw)
+            if local_folder:
+                folder_name_lower = local_folder.name.lower()
+                target_proj = projects_map.get(folder_name_lower)
+                if not target_proj or not target_proj.get("id") or not target_proj.get("folderUri"):
+                    target_proj = ensure_local_project_for_workspace(local_folder)
+                    projects_map[folder_name_lower] = target_proj
+
+                meta["project_id"] = target_proj["id"]
+                meta["workspace_uris"] = json.dumps([target_proj["folderUri"]])
+
+                # Replace old project_id with local project_id in raw_summary blob
+                if raw_bytes and old_pid and target_proj["id"] and old_pid != target_proj["id"]:
+                    if old_pid.encode() in raw_bytes:
+                        raw_bytes = raw_bytes.replace(old_pid.encode(), target_proj["id"].encode())
 
             # Normalize running status to IDLE for imported sessions
             if meta.get("status") == "CASCADE_RUN_STATUS_RUNNING":
                 meta["status"] = "IDLE"
             meta["not_fully_idle"] = 0
 
-            # Determine which DB to write to (write to both if both parent dirs exist, or appropriate one)
+            # Determine which DB to write to
             dbs_to_write = []
             if CLI_CONV_DB.parent.exists():
                 dbs_to_write.append(CLI_CONV_DB)
@@ -402,14 +578,9 @@ def import_sessions(
             cols = [c for c in DB_COLUMNS if c in meta]
             values = [meta[c] for c in cols]
 
-            # Restore raw_summary blob if available
-            if "_raw_summary_b64" in meta and meta["_raw_summary_b64"]:
-                try:
-                    raw_bytes = base64.b64decode(meta["_raw_summary_b64"])
-                    cols.append("raw_summary")
-                    values.append(sqlite3.Binary(raw_bytes))
-                except Exception:
-                    pass
+            if raw_bytes:
+                cols.append("raw_summary")
+                values.append(sqlite3.Binary(raw_bytes))
 
             col_names_str = ", ".join([f"`{c}`" for c in cols])
             placeholders = ", ".join(["?"] * len(cols))
@@ -426,7 +597,6 @@ def import_sessions(
                     conn = sqlite3.connect(db_path, timeout=5.0)
                     conn.execute(upsert_sql, values)
                     conn.commit()
-                    # Checkpoint WAL so changes are immediately visible to running Antigravity App
                     conn.execute("PRAGMA wal_checkpoint(FULL);")
                     conn.close()
                 except Exception:
@@ -453,6 +623,9 @@ def import_sessions(
         except Exception:
             stats["errors"] += 1
 
+    # After importing, run retroactive relink across all sessions in local DB
+    relink_sessions_to_local_projects()
+
     return stats
 
 
@@ -461,15 +634,18 @@ def sync_all(limit: int = 50, force: bool = False) -> Dict[str, Any]:
     Full 2-way synchronization:
     1. Import newer/missing sessions from SYNC_DIR (coming from other devices via Syncthing).
     2. Export local sessions to SYNC_DIR (pushing updates to other devices).
+    3. Relink sessions to local project paths.
     """
     import_stats = import_sessions(force=force)
     export_stats = export_sessions(limit=limit, force=force)
+    relink_stats = relink_sessions_to_local_projects()
 
     return {
         "imported": import_stats["imported"],
         "updated": import_stats["updated"],
         "exported": export_stats["exported"],
         "skipped": export_stats["skipped"],
+        "relinked": relink_stats["relinked"],
         "errors": import_stats["errors"] + export_stats["errors"]
     }
 
