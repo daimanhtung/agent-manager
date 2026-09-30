@@ -1080,16 +1080,12 @@ def deduplicate_and_relink_projects() -> Dict[str, Any]:
         except Exception:
             pass
 
-    # 3.5. Ensure every conversation has its conversation.db so Antigravity Desktop App won't drop it
-    synthesized_dbs = ensure_all_conversation_dbs()
-
     # 4. Patch agyhub_summaries_proto.pb if present
     patch_agyhub_summaries_pb(projects_map)
 
     return {
         "duplicates_removed": duplicates_removed,
-        "relinked": relinked_sessions,
-        "synthesized_dbs": synthesized_dbs
+        "relinked": relinked_sessions
     }
 
 
@@ -1177,6 +1173,22 @@ def export_sessions(
             elif not p_val and t_val:
                 row_dict["preview"] = t_val
 
+            # Require real conversation data (conversation.db with steps > 0 or transcript)
+            conv_db_src = find_local_conversation_db(cid)
+            brain_src = find_local_brain_dir(cid, row_dict.get("app_data_dir"))
+            has_transcript = brain_src and (brain_src / ".system_generated" / "logs" / "transcript.jsonl").exists()
+            has_real_steps = False
+            if conv_db_src:
+                try:
+                    c = sqlite3.connect(f"file:{conv_db_src}?mode=ro", uri=True, timeout=2.0)
+                    has_real_steps = c.execute("SELECT COUNT(*) FROM steps").fetchone()[0] > 0
+                    c.close()
+                except Exception:
+                    pass
+            if not has_real_steps and not has_transcript:
+                stats["skipped"] += 1
+                continue
+
             sess_sync_dir = SYNC_DIR / cid
             meta_file = sess_sync_dir / "meta.json"
 
@@ -1194,22 +1206,6 @@ def export_sessions(
             sess_sync_dir.mkdir(parents=True, exist_ok=True)
 
             # 1. Copy conversation SQLite DB (with WAL checkpoint)
-            conv_db_src = find_local_conversation_db(cid)
-            if not conv_db_src:
-                ws_raw = row_dict.get("workspace_uris", "")
-                uri = ""
-                if ws_raw:
-                    try:
-                        uris = json.loads(ws_raw)
-                        if uris: uri = uris[0]
-                    except Exception:
-                        pass
-                conv_db_src = synthesize_conversation_db(
-                    cid=cid,
-                    project_id=row_dict.get("project_id", ""),
-                    workspace_uri=uri,
-                    mtime_str=row_dict.get("last_modified_time")
-                )
             if conv_db_src:
                 try:
                     chk_conn = sqlite3.connect(f"file:{conv_db_src}?mode=rw", uri=True, timeout=5.0)
@@ -1303,6 +1299,13 @@ def import_sessions(
             t_val = (meta.get("title") or "").strip()
             p_val = (meta.get("preview") or "").strip()
             if (not step_cnt or step_cnt <= 0) and not t_val and not p_val:
+                stats["skipped"] += 1
+                continue
+
+            # Only import if remote actually has conversation data (conversation.db or transcript)
+            has_remote_conv = (entry / "conversation.db").exists()
+            has_remote_transcript = (entry / "brain" / ".system_generated" / "logs" / "transcript.jsonl").exists()
+            if not has_remote_conv and not has_remote_transcript:
                 stats["skipped"] += 1
                 continue
 
