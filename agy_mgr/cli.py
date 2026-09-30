@@ -87,11 +87,13 @@ def cmd_quota(args):
 
 
 def cmd_sessions(args):
-    sessions = list_all_sessions(limit=args.limit, filter_workspace=args.workspace, search=args.search)
+    limit = 0 if getattr(args, "all", False) else args.limit
+    sessions = list_all_sessions(limit=limit, filter_workspace=args.workspace, search=args.search)
     if not sessions:
         print("Không tìm thấy session nào phù hợp.")
         return
     print_sessions_table(sessions)
+
 
 
 def cmd_resume(args):
@@ -292,10 +294,12 @@ def main():
 
     # sessions
     p_sess = subparsers.add_parser("sessions", aliases=["s", "history"], help="Xem danh sách session gần đây")
-    p_sess.add_argument("--limit", "-n", type=int, default=20, help="Số lượng session hiển thị")
+    p_sess.add_argument("--limit", "-n", type=int, default=50, help="Số lượng session hiển thị (mặc định: 50, 0 = toàn bộ)")
+    p_sess.add_argument("--all", "-a", action="store_true", help="Hiển thị tất cả session không giới hạn")
     p_sess.add_argument("--workspace", "-w", help="Lọc theo thư mục workspace")
     p_sess.add_argument("--search", help="Tìm kiếm session theo từ khóa")
     p_sess.set_defaults(func=cmd_sessions)
+
 
     # resume
     p_res = subparsers.add_parser("resume", aliases=["r"], help="Tiếp tục (resume) session và xem lại ngữ cảnh cũ")

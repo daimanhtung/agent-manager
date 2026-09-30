@@ -51,7 +51,7 @@ def format_relative_time(dt: Optional[datetime]) -> str:
         return str(dt)
 
 
-def read_db_sessions(db_path: Path, source_label: str) -> List[Dict[str, Any]]:
+def read_db_sessions(db_path: Path, source_label: str, limit: int = 500) -> List[Dict[str, Any]]:
     """Read conversation summaries from a SQLite database file."""
     if not db_path.exists():
         return []
@@ -64,9 +64,9 @@ def read_db_sessions(db_path: Path, source_label: str) -> List[Dict[str, Any]]:
         SELECT conversation_id, title, preview, step_count, last_modified_time, workspace_uris, status
         FROM conversation_summaries
         ORDER BY last_modified_time DESC
-        LIMIT 100
+        LIMIT ?
         """
-        cursor.execute(query)
+        cursor.execute(query, (limit,))
         rows = cursor.fetchall()
         for r in rows:
             cid, title, preview, steps, mtime, ws_raw, status = r
@@ -125,7 +125,7 @@ def merge_syncthing_conflict_dbs():
                 pass
 
 
-def list_all_sessions(limit: int = 25, filter_workspace: Optional[str] = None, search: Optional[str] = None) -> List[Dict[str, Any]]:
+def list_all_sessions(limit: Optional[int] = 50, filter_workspace: Optional[str] = None, search: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Get combined, deduplicated sessions from both Antigravity App and Antigravity CLI.
     Sorted by most recent activity.
@@ -140,8 +140,9 @@ def list_all_sessions(limit: int = 25, filter_workspace: Optional[str] = None, s
     except Exception:
         pass
 
-    app_sessions = read_db_sessions(APP_CONV_DB, "App")
-    cli_sessions = read_db_sessions(CLI_CONV_DB, "CLI")
+    fetch_limit = 1000 if (not limit or limit <= 0) else max(limit * 2, 200)
+    app_sessions = read_db_sessions(APP_CONV_DB, "App", limit=fetch_limit)
+    cli_sessions = read_db_sessions(CLI_CONV_DB, "CLI", limit=fetch_limit)
 
     combined = {}
     for s in app_sessions + cli_sessions:
@@ -168,7 +169,9 @@ def list_all_sessions(limit: int = 25, filter_workspace: Optional[str] = None, s
             if kw in s["title"].lower() or kw in s["preview"].lower() or kw in s["id"].lower()
         ]
 
-    return sessions[:limit]
+    if limit and limit > 0:
+        return sessions[:limit]
+    return sessions
 
 
 def find_transcript_file(conversation_id: str) -> Optional[Path]:

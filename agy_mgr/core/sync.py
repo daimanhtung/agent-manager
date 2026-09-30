@@ -157,8 +157,16 @@ def adapt_workspace_uris_for_local_machine(ws_raw: str) -> str:
                 if local_repo_uri not in adapted_uris:
                     adapted_uris.insert(0, local_repo_uri)
 
-            # 2. Check if the subpath relative to user home exists locally
+            # 2. Map /Users/<other_user>/... or /home/<other_user>/... directly to local home
             parts = remote_path.parts
+            if len(parts) >= 3 and parts[1] in ("Users", "home"):
+                rel_to_user = Path(*parts[3:])
+                local_mapped = home / rel_to_user
+                local_mapped_uri = local_mapped.as_uri()
+                if local_mapped_uri not in adapted_uris:
+                    adapted_uris.insert(0, local_mapped_uri)
+
+            # 3. Check if any subpath relative to user home exists locally
             for i in range(1, len(parts)):
                 subpath = Path(*parts[i:])
                 cand = home / subpath
@@ -324,15 +332,27 @@ def import_sessions(
                 try:
                     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
                     cur = conn.cursor()
-                    cur.execute("SELECT last_modified_time FROM conversation_summaries WHERE conversation_id = ?", (cid,))
+                    cur.execute("SELECT last_modified_time, raw_summary, workspace_uris FROM conversation_summaries WHERE conversation_id = ?", (cid,))
                     row = cur.fetchone()
                     conn.close()
                     if row:
                         local_exists = True
                         local_dt = parse_sqlite_timestamp(row[0])
-                        # Check if conversation.db also already exists locally
                         conv_db_local = find_local_conversation_db(cid)
-                        if local_dt and remote_dt and local_dt >= remote_dt and conv_db_local:
+                        has_raw = row[1] is not None
+                        local_ws = row[2] or ""
+
+                        remote_has_conv_db = (entry / "conversation.db").exists()
+                        remote_has_raw = bool(meta.get("_raw_summary_b64"))
+                        # Needs workspace adaptation if local_ws doesn't have home.as_uri() yet
+                        needs_ws_update = (Path.home().as_uri() not in local_ws) if ("workspace_uris" in meta) else False
+
+                        if (
+                            local_dt and remote_dt and local_dt >= remote_dt
+                            and (not remote_has_conv_db or conv_db_local)
+                            and (not remote_has_raw or has_raw)
+                            and not needs_ws_update
+                        ):
                             local_newer = True
                 except Exception:
                     pass
