@@ -28,7 +28,13 @@ AUTH_FILES = [
 AGY_BIN = shutil.which("agy") or str(HOME / ".local" / "bin" / "agy")
 ANTIGRAVITY_APP_PATH = Path("/Applications/Antigravity.app")
 
+# Repository & Syncthing Session Sync
+REPO_DIR = Path(__file__).resolve().parent.parent
+SYNC_DIR = Path(os.environ.get("AGY_SYNC_DIR", REPO_DIR / "synced_sessions"))
+
 # Ensure required directories exist
 MGR_HOME.mkdir(parents=True, exist_ok=True)
 PROFILES_DIR.mkdir(parents=True, exist_ok=True)
 APP_PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+SYNC_DIR.mkdir(parents=True, exist_ok=True)
+

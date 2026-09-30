@@ -133,6 +133,13 @@ def list_all_sessions(limit: int = 25, filter_workspace: Optional[str] = None, s
     # Merge any incoming Syncthing conflict databases automatically
     merge_syncthing_conflict_dbs()
 
+    # Automatically import any synced sessions received from other devices via Syncthing
+    try:
+        from agy_mgr.core.sync import auto_import_synced_sessions
+        auto_import_synced_sessions()
+    except Exception:
+        pass
+
     app_sessions = read_db_sessions(APP_CONV_DB, "App")
     cli_sessions = read_db_sessions(CLI_CONV_DB, "CLI")
 

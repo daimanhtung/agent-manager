@@ -17,10 +17,17 @@ from agy_mgr.core.quota import get_all_accounts_quota
 from agy_mgr.core.sessions import list_all_sessions, resume_session, print_session_log
 from agy_mgr.core.app_launcher import launch_app_instance, list_app_profiles
 from agy_mgr.core.runner import run_with_smart_failover
+from agy_mgr.core.sync import (
+    sync_all,
+    export_sessions,
+    import_sessions,
+    get_sync_status,
+)
 from agy_mgr.ui.formatters import (
     print_accounts_table,
     print_quota_table,
     print_sessions_table,
+    print_sync_table,
     prompt_select_option,
     BOLD,
     GREEN,
@@ -28,7 +35,9 @@ from agy_mgr.ui.formatters import (
     YELLOW,
     CYAN,
     RESET,
+    DIM,
 )
+
 
 
 def cmd_list(args):
@@ -211,6 +220,41 @@ def cmd_completion(args):
         print(get_completion_script(shell))
 
 
+def cmd_sync(args):
+    action = getattr(args, "sync_action", None)
+    force = getattr(args, "force", False)
+    limit = getattr(args, "limit", 50)
+    sess_id = getattr(args, "id", None)
+
+    if action in ("status", "st"):
+        st = get_sync_status()
+        print_sync_table(st)
+        return
+
+    if action in ("push", "export"):
+        print(f"\n[*] Đang xuất session ra kho đồng bộ Syncthing...")
+        res = export_sessions(session_ids=[sess_id] if sess_id else None, limit=limit, force=force)
+        print(f"{GREEN}[✓] Hoàn tất:{RESET} {BOLD}{res['exported']}{RESET} session được xuất, {DIM}{res['skipped']}{RESET} bỏ qua (đã mới nhất).\n")
+        return
+
+    if action in ("pull", "import"):
+        print(f"\n[*] Đang nhập session từ kho đồng bộ Syncthing...")
+        res = import_sessions(session_ids=[sess_id] if sess_id else None, force=force)
+        print(f"{GREEN}[✓] Hoàn tất:{RESET} {BOLD}{res['imported']}{RESET} session mới, {BOLD}{res['updated']}{RESET} đã cập nhật, {DIM}{res['skipped']}{RESET} bỏ qua.\n")
+        return
+
+    # Default: 2-way sync
+    print(f"\n[*] Đang đồng bộ session 2 chiều (Syncthing / Repo)...")
+    res = sync_all(limit=limit, force=force)
+    print(
+        f"{GREEN}[✓] Đồng bộ thành công:{RESET} "
+        f"{BOLD}{res['imported']}{RESET} mới nhập | "
+        f"{BOLD}{res['updated']}{RESET} cập nhật | "
+        f"{BOLD}{res['exported']}{RESET} đã xuất | "
+        f"{DIM}{res['skipped']}{RESET} bỏ qua\n"
+    )
+
+
 def cmd_update(args):
     repo_dir = Path(__file__).resolve().parent.parent
     print(f"\n[*] Đang cập nhật agy-mgr từ GitHub...")
@@ -222,6 +266,7 @@ def cmd_update(args):
 
     # Fallback to curl installer
     subprocess.call("curl -fsSL https://raw.githubusercontent.com/daimanhtung/agent-manager/main/install.sh | bash", shell=True)
+
 
 
 def main():
@@ -264,6 +309,15 @@ def main():
     p_log.add_argument("id", nargs="?", help="ID session (nếu để trống sẽ hiển thị menu chọn)")
     p_log.add_argument("--limit", "-n", type=int, default=10, help="Số lượt hội thoại muốn xem (mặc định: 10, 0 = toàn bộ)")
     p_log.set_defaults(func=cmd_log)
+
+    # sync
+    p_sync = subparsers.add_parser("sync", help="Đồng bộ session giữa các thiết bị (qua Syncthing / Repo)")
+    p_sync.add_argument("sync_action", nargs="?", choices=["push", "export", "pull", "import", "status", "st"], help="Hành động: push (xuất), pull (nhập), status (kiểm tra). Mặc định là đồng bộ 2 chiều")
+    p_sync.add_argument("--id", help="Chỉ đồng bộ một session ID cụ thể")
+    p_sync.add_argument("--limit", "-n", type=int, default=50, help="Số session gần nhất cần đồng bộ (mặc định: 50)")
+    p_sync.add_argument("--force", "-f", action="store_true", help="Ghi đè ngay cả khi bản hiện tại bằng hoặc mới hơn")
+    p_sync.set_defaults(func=cmd_sync)
+
 
     # add
     p_add = subparsers.add_parser("add", help="Thêm tài khoản Google mới")

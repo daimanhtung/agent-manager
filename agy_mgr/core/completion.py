@@ -16,6 +16,7 @@ _agy_mgr() {
         'remove:Xóa một tài khoản'
         'import:Import tài khoản từ thư mục ngoài'
         'app:Quản lý cửa sổ Antigravity Desktop'
+        'sync:Đồng bộ session giữa các thiết bị (qua Syncthing)'
         'completion:Cài đặt auto-completion cho terminal'
     )
 
@@ -30,6 +31,19 @@ _agy_mgr() {
             local -a profiles
             profiles=(${(f)"$(python3 -c 'from agy_mgr.config import PROFILES_DIR; print("\\n".join([p.name for p in PROFILES_DIR.iterdir() if p.is_dir()]))' 2>/dev/null)"})
             _describe -t profiles 'tài khoản' profiles
+            ;;
+        sync)
+            if (( CURRENT == 3 )); then
+                local -a sync_cmds
+                sync_cmds=(
+                    'push:Xuất session ra thư mục sync'
+                    'pull:Kéo session từ thư mục sync về'
+                    'status:Xem trạng thái đồng bộ'
+                )
+                _describe -t sync_cmds 'sync actions' sync_cmds
+            else
+                _arguments '--id[Chỉ định session ID]' '-n[Số lượng session]' '--limit[Số lượng session]' '-f[Ghi đè]' '--force[Ghi đè]'
+            fi
             ;;
         app)
             if (( CURRENT == 3 )); then
@@ -60,7 +74,7 @@ BASH_SCRIPT = """_agy_mgr_bash() {
     local cur prev words cword
     _init_completion 2>/dev/null || return
 
-    local commands="list switch quota sessions resume add import remove app completion"
+    local commands="list switch quota sessions resume sync add import remove app completion"
 
     if [[ $cword -eq 1 ]]; then
         COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
@@ -71,6 +85,11 @@ BASH_SCRIPT = """_agy_mgr_bash() {
         switch|remove|rm)
             local profiles=$(python3 -c "from agy_mgr.config import PROFILES_DIR; print(' '.join([p.name for p in PROFILES_DIR.iterdir() if p.is_dir()]))" 2>/dev/null)
             COMPREPLY=( $(compgen -W "$profiles" -- "$cur") )
+            ;;
+        sync)
+            if [[ $cword -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "push pull status -n --limit --id -f --force" -- "$cur") )
+            fi
             ;;
         quota)
             COMPREPLY=( $(compgen -W "-r --refresh-all" -- "$cur") )

@@ -18,12 +18,17 @@ Bộ công cụ mạnh mẽ và tiện lợi giúp quản trị đa tài khoản
    - Tổng hợp toàn bộ session từ cả **Antigravity App** và **`agy` CLI** theo thời gian thực.
    - Tìm kiếm session theo tên, từ khóa hoặc thư mục workspace.
    - **1-Click Resume:** Menu tương tác chọn session để mở lại tiếp tục làm việc ngay lập tức.
-4. **Smart Runner (`agy-run`) & Tự Động Chuyển Khi Hết Quota:**
+4. **Đồng Bộ Session Đa Thiết Bị (Syncthing / Repo Sync):**
+   - Tự động đồng bộ toàn bộ lịch sử session, tóm tắt và brain transcript giữa nhiều máy tính.
+   - Tận dụng cơ chế đồng bộ Syncthing của chính repository này: an toàn, tức thì, bảo mật P2P.
+   - Tự động nhận diện và cập nhật session khi chạy `agy-mgr sessions` hoặc `agy-mgr resume`.
+5. **Smart Runner (`agy-run`) & Tự Động Chuyển Khi Hết Quota:**
    - Thay thế lệnh gọi `agy` thông thường bằng `agy-run`.
    - Tự động chọn tài khoản có quota cao nhất (Highest-Quota-First).
    - Tự động bắt lỗi `429 / RESOURCE_EXHAUSTED` và chuyển sang tài khoản kế tiếp mà không ngắt quãng công việc.
-5. **Chạy Song Song Nhiều Cửa Sổ Antigravity Desktop App:**
+6. **Chạy Song Song Nhiều Cửa Sổ Antigravity Desktop App:**
    - Mở đồng thời 2 hoặc nhiều cửa sổ Antigravity App độc lập, mỗi cửa sổ đăng nhập một tài khoản riêng biệt.
+
 
 ---
 
@@ -102,7 +107,30 @@ agy-mgr resume
 agy-mgr resume 128ccf9a
 ```
 
-### 4. Smart Runner (`agy-run`)
+### 4. Đồng Bộ Session Giữa Các Thiết Bị (Syncthing / Repo)
+
+Khi bạn làm việc trên nhiều máy tính (Laptop, PC, Mac mini Server) và repository này đã được cấu hình **Syncthing** đồng bộ qua lại:
+
+```bash
+# Đồng bộ 2 chiều (nhập session mới từ máy khác và xuất session máy hiện tại)
+agy-mgr sync
+
+# Xem bảng tình trạng đồng bộ giữa máy hiện tại và kho sync
+agy-mgr sync status
+
+# Chỉ đẩy session máy này ra kho sync
+agy-mgr sync push
+
+# Chỉ kéo session từ kho sync vào máy này
+agy-mgr sync pull
+
+# Đồng bộ một session cụ thể theo ID
+agy-mgr sync --id fec07da5
+```
+
+> **Cơ chế tự động:** Khi bạn chạy `agy-mgr sessions` hoặc `agy-mgr resume`, công cụ sẽ **tự động kiểm tra và nhận diện** các session mới mà Syncthing vừa truyền về từ các máy khác mà bạn không cần phải gõ lệnh kéo thủ công!
+
+### 5. Smart Runner (`agy-run`)
 
 Sử dụng `agy-run` thay cho `agy`. Tool sẽ tự động ưu tiên tài khoản nhiều quota nhất và tự động failover nếu gặp giới hạn rate limit:
 
@@ -114,7 +142,7 @@ agy-run -p "Viết một hàm Python tính fibonacci"
 agy-run -i "Tiếp tục review code"
 ```
 
-### 5. Mở Cửa Sổ Antigravity Desktop App Độc Lập (Multi-Window)
+### 6. Mở Cửa Sổ Antigravity Desktop App Độc Lập (Multi-Window)
 
 Để mở thêm một cửa sổ Antigravity App hoàn toàn riêng biệt (chạy song song trên màn hình với tài khoản khác):
 ```bash
@@ -128,7 +156,9 @@ agy-mgr app launch acc2 --workspace /Users/daitung/Project/MyProject/agent-manag
 ---
 
 ## 📂 Cấu Trúc Lưu Trữ Dữ Liệu
+- `synced_sessions/`: Kho chứa các session đồng bộ giữa các máy (được Syncthing tự động đồng bộ qua P2P).
 - `~/.agy-manager/profiles/`: Chứa các profile tài khoản độc lập.
 - `~/.agy-manager/active.json`: Ghi nhận tài khoản đang active.
 - `~/.agy-manager/state.json`: Lưu trữ trạng thái cooldown và bộ đếm.
 - `~/.antigravity-profiles/`: Chứa dữ liệu các instance Antigravity App độc lập.
+

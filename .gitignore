@@ -24,6 +24,10 @@ active.json
 *.pb
 *.log
 
+# Syncthing session sync folder (synced across devices via Syncthing;
+# ignored by git by default to prevent pushing private chat history to GitHub)
+synced_sessions/
+
 # Editor configs
 .vscode/
 .idea/

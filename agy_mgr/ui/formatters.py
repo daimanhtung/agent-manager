@@ -171,3 +171,64 @@ def prompt_select_option(options: List[str], prompt: str = "Chọn số thứ t�
         except (KeyboardInterrupt, EOFError):
             print("\nĐã hủy.")
             return -1
+
+
+def print_sync_table(status_data: Dict[str, Any]):
+    """Print formatted session sync status table."""
+    print_header("TÌNH TRẠNG ĐỒNG BỘ SESSION (SYNCTHING / REPO)")
+    print(f"Thư mục kho sync : {CYAN}{status_data['sync_dir']}{RESET}")
+    print(
+        f"Tổng quan        : {BOLD}{status_data['in_sync']}{RESET} Đã đồng bộ | "
+        f"{YELLOW}{status_data['pending_push']} Chờ tải lên{RESET} | "
+        f"{GREEN}{status_data['pending_pull']} Chờ tải về từ máy khác{RESET}\n"
+    )
+
+    items = status_data.get("items", [])
+    if not items:
+        print(f"{DIM}Chưa có dữ liệu session nào trong máy hoặc kho sync.{RESET}\n")
+        return
+
+    cols = [
+        ("ID", 10),
+        ("Workspace", 18),
+        ("Thời gian", 14),
+        ("Trạng thái Đồng bộ", 34),
+        ("Tiêu đề Session", 38),
+    ]
+    header = " ".join([pad(f"{BOLD}{c[0]}{RESET}", c[1]) for c in cols])
+    print(header)
+    print("─" * 115)
+
+    for s in items:
+        sid = s["id"][:8]
+        ws = s["workspace"] or "(default)"
+        if len(ws) > 16:
+            ws = ws[:13] + "..."
+        mtime = s["modified_str"]
+        state = s["state"]
+
+        if "Đã đồng bộ" in state:
+            state_colored = f"{GREEN}✓ {state}{RESET}"
+        elif "Chờ kéo về" in state or "mới hơn" in state:
+            state_colored = f"{CYAN}⬇ {state}{RESET}"
+        elif "Chờ đẩy lên" in state:
+            state_colored = f"{YELLOW}⬆ {state}{RESET}"
+        else:
+            state_colored = f"{DIM}{state}{RESET}"
+
+        title = s["title"]
+        if len(title) > 36:
+            title = title[:33] + "..."
+
+        row = (
+            f"{pad(sid, 10)} "
+            f"{pad(ws, 18)} "
+            f"{pad(mtime, 14)} "
+            f"{pad(state_colored, 34)} "
+            f"{BOLD}{title}{RESET}"
+        )
+        print(row)
+
+    print("─" * 115)
+    print(f"{DIM}Dùng 'agy-mgr sync' để tự động đồng bộ 2 chiều (kéo bản mới về và đẩy bản local lên).{RESET}\n")
+
