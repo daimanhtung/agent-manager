@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import shutil
@@ -11,6 +12,7 @@ from agy_mgr.config import (
     APP_CONV_DB,
     CLI_CONV_DB,
     GEMINI_HOME,
+    REPO_DIR,
     SYNC_DIR,
 )
 from agy_mgr.core.sessions import parse_sqlite_timestamp, format_relative_time
@@ -80,6 +82,30 @@ def find_local_brain_dir(conversation_id: str, app_data_dir: Optional[str] = Non
     return None
 
 
+def find_local_conversation_db(conversation_id: str) -> Optional[Path]:
+    """Find local conversation SQLite DB for a given conversation_id."""
+    candidates = [
+        GEMINI_HOME / "antigravity" / "conversations" / f"{conversation_id}.db",
+        GEMINI_HOME / "antigravity-cli" / "conversations" / f"{conversation_id}.db",
+    ]
+    for p in candidates:
+        if p.exists() and p.is_file():
+            return p
+    return None
+
+
+def find_local_annotation(conversation_id: str) -> Optional[Path]:
+    """Find local annotation pbtxt for a given conversation_id."""
+    candidates = [
+        GEMINI_HOME / "antigravity" / "annotations" / f"{conversation_id}.pbtxt",
+        GEMINI_HOME / "antigravity-cli" / "annotations" / f"{conversation_id}.pbtxt",
+    ]
+    for p in candidates:
+        if p.exists() and p.is_file():
+            return p
+    return None
+
+
 def copy_brain_tree(src: Path, dst: Path):
     """
     Safely copy brain directory from src to dst.
@@ -101,88 +127,6 @@ def copy_brain_tree(src: Path, dst: Path):
                     shutil.copy2(src_file, dst_file)
             except Exception:
                 pass
-
-
-def export_sessions(
-    session_ids: Optional[List[str]] = None,
-    limit: int = 50,
-    force: bool = False
-) -> Dict[str, Any]:
-    """
-    Export local sessions and their brain data into the repository sync folder (SYNC_DIR).
-    Syncthing will then automatically sync these files to other devices.
-    """
-    SYNC_DIR.mkdir(parents=True, exist_ok=True)
-    hostname = socket.gethostname()
-    now_iso = datetime.now(timezone.utc).isoformat()
-
-    stats = {"exported": 0, "skipped": 0, "errors": 0}
-
-    # Gather rows from both APP and CLI DBs
-    rows_by_id = {}
-    for db_path in [APP_CONV_DB, CLI_CONV_DB]:
-        if not db_path.exists():
-            continue
-        try:
-            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cols_str = ", ".join([f"`{c}`" for c in DB_COLUMNS])
-            query = f"SELECT {cols_str} FROM conversation_summaries ORDER BY last_modified_time DESC LIMIT ?"
-            cursor.execute(query, (limit if not session_ids else 500,))
-            for r in cursor.fetchall():
-                cid = r["conversation_id"]
-                if session_ids and cid not in session_ids and not any(cid.startswith(s) for s in session_ids):
-                    continue
-                dt = parse_sqlite_timestamp(r["last_modified_time"])
-                if cid not in rows_by_id:
-                    rows_by_id[cid] = (dict(r), dt)
-                else:
-                    existing_dt = rows_by_id[cid][1]
-                    if dt and existing_dt and dt > existing_dt:
-                        rows_by_id[cid] = (dict(r), dt)
-            conn.close()
-        except Exception:
-            pass
-
-    for cid, (row_dict, local_dt) in rows_by_id.items():
-        try:
-            sess_sync_dir = SYNC_DIR / cid
-            meta_file = sess_sync_dir / "meta.json"
-
-            # Check if sync directory already has an equal or newer version
-            if meta_file.exists() and not force:
-                try:
-                    with open(meta_file, "r", encoding="utf-8") as f:
-                        meta_data = json.load(f)
-                    remote_dt = parse_sqlite_timestamp(meta_data.get("last_modified_time"))
-                    if remote_dt and local_dt and remote_dt >= local_dt:
-                        stats["skipped"] += 1
-                        continue
-                except Exception:
-                    pass
-
-            sess_sync_dir.mkdir(parents=True, exist_ok=True)
-
-            # Copy brain directory
-            brain_src = find_local_brain_dir(cid, row_dict.get("app_data_dir"))
-            if brain_src:
-                brain_dst = sess_sync_dir / "brain"
-                copy_brain_tree(brain_src, brain_dst)
-
-            # Prepare meta.json
-            meta_to_save = dict(row_dict)
-            meta_to_save["_sync_exported_at"] = now_iso
-            meta_to_save["_sync_exported_by"] = hostname
-
-            with open(meta_file, "w", encoding="utf-8") as f:
-                json.dump(meta_to_save, f, indent=2, ensure_ascii=False)
-
-            stats["exported"] += 1
-        except Exception:
-            stats["errors"] += 1
-
-    return stats
 
 
 def adapt_workspace_uris_for_local_machine(ws_raw: str) -> str:
@@ -229,13 +173,119 @@ def adapt_workspace_uris_for_local_machine(ws_raw: str) -> str:
         return ws_raw
 
 
+def export_sessions(
+    session_ids: Optional[List[str]] = None,
+    limit: int = 50,
+    force: bool = False
+) -> Dict[str, Any]:
+    """
+    Export local sessions, conversation DBs, annotations, and brain data
+    into the repository sync folder (SYNC_DIR).
+    """
+    SYNC_DIR.mkdir(parents=True, exist_ok=True)
+    hostname = socket.gethostname()
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    stats = {"exported": 0, "skipped": 0, "errors": 0}
+
+    # Gather rows from both APP and CLI DBs
+    rows_by_id = {}
+    for db_path in [APP_CONV_DB, CLI_CONV_DB]:
+        if not db_path.exists():
+            continue
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cols_str = ", ".join([f"`{c}`" for c in DB_COLUMNS])
+            query = f"SELECT {cols_str}, raw_summary FROM conversation_summaries ORDER BY last_modified_time DESC LIMIT ?"
+            cursor.execute(query, (limit if not session_ids else 500,))
+            for r in cursor.fetchall():
+                cid = r["conversation_id"]
+                if session_ids and cid not in session_ids and not any(cid.startswith(s) for s in session_ids):
+                    continue
+                dt = parse_sqlite_timestamp(r["last_modified_time"])
+                row_d = dict(r)
+                raw_blob = row_d.pop("raw_summary", None)
+                if cid not in rows_by_id:
+                    rows_by_id[cid] = (row_d, raw_blob, dt)
+                else:
+                    existing_dt = rows_by_id[cid][2]
+                    if dt and existing_dt and dt > existing_dt:
+                        rows_by_id[cid] = (row_d, raw_blob, dt)
+            conn.close()
+        except Exception:
+            pass
+
+    for cid, (row_dict, raw_blob, local_dt) in rows_by_id.items():
+        try:
+            sess_sync_dir = SYNC_DIR / cid
+            meta_file = sess_sync_dir / "meta.json"
+
+            # Check if sync directory already has an equal or newer version
+            if meta_file.exists() and not force:
+                try:
+                    with open(meta_file, "r", encoding="utf-8") as f:
+                        meta_data = json.load(f)
+                    remote_dt = parse_sqlite_timestamp(meta_data.get("last_modified_time"))
+                    # If remote is newer and conversation.db exists in sync, we can skip
+                    if remote_dt and local_dt and remote_dt >= local_dt and (sess_sync_dir / "conversation.db").exists():
+                        stats["skipped"] += 1
+                        continue
+                except Exception:
+                    pass
+
+            sess_sync_dir.mkdir(parents=True, exist_ok=True)
+
+            # 1. Copy conversation SQLite DB (with WAL checkpoint)
+            conv_db_src = find_local_conversation_db(cid)
+            if conv_db_src:
+                try:
+                    chk_conn = sqlite3.connect(f"file:{conv_db_src}?mode=rw", uri=True, timeout=5.0)
+                    chk_conn.execute("PRAGMA wal_checkpoint(FULL);")
+                    chk_conn.close()
+                except Exception:
+                    pass
+                shutil.copy2(conv_db_src, sess_sync_dir / "conversation.db")
+
+            # 2. Copy annotation pbtxt
+            ann_src = find_local_annotation(cid)
+            if ann_src:
+                shutil.copy2(ann_src, sess_sync_dir / "annotation.pbtxt")
+
+            # 3. Copy brain directory
+            brain_src = find_local_brain_dir(cid, row_dict.get("app_data_dir"))
+            if brain_src:
+                brain_dst = sess_sync_dir / "brain"
+                copy_brain_tree(brain_src, brain_dst)
+
+            # 4. Prepare and save meta.json
+            meta_to_save = dict(row_dict)
+            if raw_blob:
+                try:
+                    meta_to_save["_raw_summary_b64"] = base64.b64encode(raw_blob).decode("ascii")
+                except Exception:
+                    pass
+            meta_to_save["_sync_exported_at"] = now_iso
+            meta_to_save["_sync_exported_by"] = hostname
+
+            with open(meta_file, "w", encoding="utf-8") as f:
+                json.dump(meta_to_save, f, indent=2, ensure_ascii=False)
+
+            stats["exported"] += 1
+        except Exception:
+            stats["errors"] += 1
+
+    return stats
+
+
 def import_sessions(
     session_ids: Optional[List[str]] = None,
     force: bool = False
 ) -> Dict[str, Any]:
     """
     Import sessions from the repository sync folder (SYNC_DIR) into the local Antigravity environment.
-    Updates SQLite conversation_summaries and copies brain directory.
+    Updates SQLite conversation_summaries, conversation.db, annotations, and brain directories.
     """
     if not SYNC_DIR.exists():
         return {"imported": 0, "updated": 0, "skipped": 0, "errors": 0}
@@ -280,7 +330,9 @@ def import_sessions(
                     if row:
                         local_exists = True
                         local_dt = parse_sqlite_timestamp(row[0])
-                        if local_dt and remote_dt and local_dt >= remote_dt:
+                        # Check if conversation.db also already exists locally
+                        conv_db_local = find_local_conversation_db(cid)
+                        if local_dt and remote_dt and local_dt >= remote_dt and conv_db_local:
                             local_newer = True
                 except Exception:
                     pass
@@ -289,7 +341,29 @@ def import_sessions(
                 stats["skipped"] += 1
                 continue
 
-            # Adapt workspace URIs so the local Antigravity App matches the open folder
+            # 1. Copy conversation.db to conversations/ folders
+            conv_db_src = entry / "conversation.db"
+            if conv_db_src.exists():
+                for base in [GEMINI_HOME / "antigravity", GEMINI_HOME / "antigravity-cli"]:
+                    if base.exists():
+                        conv_dir = base / "conversations"
+                        conv_dir.mkdir(parents=True, exist_ok=True)
+                        dest_db = conv_dir / f"{cid}.db"
+                        shutil.copy2(conv_db_src, dest_db)
+                        # Remove stale WAL/SHM to avoid locking or stale cache
+                        (conv_dir / f"{cid}.db-wal").unlink(missing_ok=True)
+                        (conv_dir / f"{cid}.db-shm").unlink(missing_ok=True)
+
+            # 2. Copy annotation.pbtxt to annotations/ folders
+            ann_src = entry / "annotation.pbtxt"
+            if ann_src.exists():
+                for base in [GEMINI_HOME / "antigravity", GEMINI_HOME / "antigravity-cli"]:
+                    if base.exists():
+                        ann_dir = base / "annotations"
+                        ann_dir.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(ann_src, ann_dir / f"{cid}.pbtxt")
+
+            # 3. Adapt workspace URIs so the local Antigravity App matches the open folder
             if "workspace_uris" in meta:
                 meta["workspace_uris"] = adapt_workspace_uris_for_local_machine(meta["workspace_uris"])
 
@@ -306,10 +380,20 @@ def import_sessions(
                 dbs_to_write.append(APP_CONV_DB)
 
             cols = [c for c in DB_COLUMNS if c in meta]
+            values = [meta[c] for c in cols]
+
+            # Restore raw_summary blob if available
+            if "_raw_summary_b64" in meta and meta["_raw_summary_b64"]:
+                try:
+                    raw_bytes = base64.b64decode(meta["_raw_summary_b64"])
+                    cols.append("raw_summary")
+                    values.append(sqlite3.Binary(raw_bytes))
+                except Exception:
+                    pass
+
             col_names_str = ", ".join([f"`{c}`" for c in cols])
             placeholders = ", ".join(["?"] * len(cols))
             update_clauses = ", ".join([f"`{c}` = excluded.`{c}`" for c in cols if c != "conversation_id"])
-            values = [meta[c] for c in cols]
 
             upsert_sql = f"""
             INSERT INTO conversation_summaries ({col_names_str})
@@ -322,14 +406,15 @@ def import_sessions(
                     conn = sqlite3.connect(db_path, timeout=5.0)
                     conn.execute(upsert_sql, values)
                     conn.commit()
+                    # Checkpoint WAL so changes are immediately visible to running Antigravity App
+                    conn.execute("PRAGMA wal_checkpoint(FULL);")
                     conn.close()
                 except Exception:
                     pass
 
-            # Sync brain folder
+            # 4. Sync brain folder
             brain_src = entry / "brain"
             if brain_src.exists():
-                # Target brain directories
                 targets = []
                 app_data = meta.get("app_data_dir") or "antigravity"
                 if app_data == "antigravity-cli" or (GEMINI_HOME / "antigravity-cli").exists():
@@ -377,7 +462,6 @@ def auto_import_synced_sessions():
     try:
         if not SYNC_DIR.exists():
             return
-        # Run import silently
         import_sessions()
     except Exception:
         pass
