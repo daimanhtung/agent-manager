@@ -329,6 +329,111 @@ def synthesize_raw_summary(
     return encode_proto(fields)
 
 
+def synthesize_conversation_db(
+    cid: str,
+    project_id: str,
+    workspace_uri: str,
+    mtime_str: Optional[str] = None
+) -> Optional[Path]:
+    """
+    Synthesize a valid SQLite conversation database for a session when the original .db file is missing.
+    Prevents Antigravity Desktop App from silently deleting the session from its sidebar/cache.
+    """
+    dt = parse_sqlite_timestamp(mtime_str) or datetime.now(timezone.utc)
+    ts = int(dt.timestamp())
+    uri_b = workspace_uri.encode("utf-8") if workspace_uri else b""
+    pid_b = project_id.encode("utf-8") if project_id else b""
+
+    fields = [
+        (1, 2, [(1, 2, uri_b), (3, 2, [])]),
+        (2, 2, [(1, 0, ts), (2, 0, 0)]),
+        (3, 2, str(uuid.uuid4()).encode("utf-8")),
+        (7, 2, uri_b),
+        (18, 2, pid_b)
+    ]
+    blob_bytes = encode_proto(fields)
+
+    created_paths = []
+    for base_dir in [GEMINI_HOME / "antigravity", GEMINI_HOME / "antigravity-cli"]:
+        conv_dir = base_dir / "conversations"
+        conv_dir.mkdir(parents=True, exist_ok=True)
+        dest_db = conv_dir / f"{cid}.db"
+        if not dest_db.exists():
+            try:
+                conn = sqlite3.connect(dest_db, timeout=5.0)
+                conn.execute("CREATE TABLE IF NOT EXISTS `trajectory_meta` (`trajectory_id` text,`cascade_id` text,`trajectory_type` integer,`source` integer,PRIMARY KEY (`trajectory_id`));")
+                conn.execute("CREATE TABLE IF NOT EXISTS `steps` (`idx` integer,`step_type` integer NOT NULL DEFAULT 0,`status` integer NOT NULL DEFAULT 0,`has_subtrajectory` numeric NOT NULL DEFAULT false,`metadata` blob,`error_details` blob,`permissions` blob,`task_details` blob,`render_info` blob,`step_payload` blob,`step_format` integer NOT NULL DEFAULT 0,PRIMARY KEY (`idx`));")
+                conn.execute("CREATE TABLE IF NOT EXISTS `gen_metadata` (`idx` integer,`data` blob,`size` integer NOT NULL DEFAULT 0,PRIMARY KEY (`idx`));")
+                conn.execute("CREATE TABLE IF NOT EXISTS `executor_metadata` (`idx` integer,`data` blob,PRIMARY KEY (`idx`));")
+                conn.execute("CREATE TABLE IF NOT EXISTS `parent_references` (`idx` integer,`data` blob,PRIMARY KEY (`idx`));")
+                conn.execute("CREATE TABLE IF NOT EXISTS `trajectory_metadata_blob` (`id` text DEFAULT 'main',`data` blob,PRIMARY KEY (`id`));")
+                conn.execute("CREATE TABLE IF NOT EXISTS `battle_mode_infos` (`idx` integer,`data` blob,PRIMARY KEY (`idx`));")
+
+                traj_id = str(uuid.uuid4())
+                conn.execute("INSERT OR REPLACE INTO trajectory_meta VALUES (?, ?, 4, 17)", (traj_id, cid))
+                conn.execute("INSERT OR REPLACE INTO trajectory_metadata_blob VALUES ('main', ?)", (blob_bytes,))
+                conn.commit()
+                conn.close()
+                created_paths.append(dest_db)
+            except Exception:
+                pass
+
+    # Also save to SYNC_DIR if missing so Syncthing pushes it to other machines
+    sync_conv = SYNC_DIR / cid / "conversation.db"
+    if not sync_conv.exists() and created_paths:
+        try:
+            (SYNC_DIR / cid).mkdir(parents=True, exist_ok=True)
+            shutil.copy2(created_paths[0], sync_conv)
+        except Exception:
+            pass
+
+    return created_paths[0] if created_paths else None
+
+
+def ensure_all_conversation_dbs() -> int:
+    """
+    Ensure every session in conversation_summaries.db has a corresponding conversation SQLite DB file.
+    If missing, automatically synthesizes it to ensure Antigravity Desktop App renders it in the sidebar.
+    Returns the count of newly synthesized databases.
+    """
+    synthesized = 0
+    for db_path in [APP_CONV_DB, CLI_CONV_DB]:
+        if not db_path.exists():
+            continue
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("SELECT conversation_id, project_id, workspace_uris, last_modified_time FROM conversation_summaries")
+            rows = cur.fetchall()
+            conn.close()
+
+            for r in rows:
+                cid = r["conversation_id"]
+                conv_file = find_local_conversation_db(cid)
+                if not conv_file:
+                    ws_raw = r["workspace_uris"]
+                    uri = ""
+                    if ws_raw:
+                        try:
+                            uris = json.loads(ws_raw)
+                            if uris:
+                                uri = uris[0]
+                        except Exception:
+                            pass
+                    res = synthesize_conversation_db(
+                        cid=cid,
+                        project_id=r["project_id"] or "",
+                        workspace_uri=uri,
+                        mtime_str=r["last_modified_time"]
+                    )
+                    if res:
+                        synthesized += 1
+        except Exception:
+            pass
+    return synthesized
+
+
 def patch_agyhub_summaries_pb(projects_map: Dict[str, Dict[str, Any]]):
     """Patch agyhub_summaries_proto.pb to map all foreign URIs and project IDs to local ones, and add missing sessions."""
     pb_file = GEMINI_HOME / "antigravity" / "agyhub_summaries_proto.pb"
@@ -898,12 +1003,16 @@ def deduplicate_and_relink_projects() -> Dict[str, Any]:
         except Exception:
             pass
 
+    # 3.5. Ensure every conversation has its conversation.db so Antigravity Desktop App won't drop it
+    synthesized_dbs = ensure_all_conversation_dbs()
+
     # 4. Patch agyhub_summaries_proto.pb if present
     patch_agyhub_summaries_pb(projects_map)
 
     return {
         "duplicates_removed": duplicates_removed,
-        "relinked": relinked_sessions
+        "relinked": relinked_sessions,
+        "synthesized_dbs": synthesized_dbs
     }
 
 
@@ -995,6 +1104,21 @@ def export_sessions(
 
             # 1. Copy conversation SQLite DB (with WAL checkpoint)
             conv_db_src = find_local_conversation_db(cid)
+            if not conv_db_src:
+                ws_raw = row_dict.get("workspace_uris", "")
+                uri = ""
+                if ws_raw:
+                    try:
+                        uris = json.loads(ws_raw)
+                        if uris: uri = uris[0]
+                    except Exception:
+                        pass
+                conv_db_src = synthesize_conversation_db(
+                    cid=cid,
+                    project_id=row_dict.get("project_id", ""),
+                    workspace_uri=uri,
+                    mtime_str=row_dict.get("last_modified_time")
+                )
             if conv_db_src:
                 try:
                     chk_conn = sqlite3.connect(f"file:{conv_db_src}?mode=rw", uri=True, timeout=5.0)
