@@ -974,6 +974,45 @@ def deduplicate_and_relink_projects() -> Dict[str, Any]:
                 ws_raw = r["workspace_uris"]
                 curr_pid = r["project_id"] or ""
                 raw_blob = r["raw_summary"]
+                title_val = (r["title"] or "").strip()
+                preview_val = (r["preview"] or "").strip()
+                steps_val = r["step_count"]
+                mtime_val = r["last_modified_time"]
+
+                need_update = False
+
+                # 1. Recover missing metadata from meta.json if title, preview, or workspace is missing
+                if not title_val or not preview_val or not ws_raw or ws_raw == "[]":
+                    mf = SYNC_DIR / cid / "meta.json"
+                    if mf.exists():
+                        try:
+                            m = json.load(open(mf))
+                            meta_t = (m.get("title") or "").strip()
+                            meta_p = (m.get("preview") or "").strip()
+                            meta_ws = m.get("workspace_uris", "")
+                            if not title_val and meta_t:
+                                title_val = meta_t
+                                need_update = True
+                            if not preview_val and meta_p:
+                                preview_val = meta_p
+                                need_update = True
+                            if (not ws_raw or ws_raw == "[]") and meta_ws:
+                                ws_raw = meta_ws
+                                need_update = True
+                            if not steps_val and m.get("step_count"):
+                                steps_val = m.get("step_count")
+                                need_update = True
+                            if (not mtime_val or mtime_val.startswith("0001")) and m.get("last_modified_time") and not m.get("last_modified_time").startswith("0001"):
+                                mtime_val = m.get("last_modified_time")
+                                need_update = True
+                        except Exception:
+                            pass
+
+                # 2. If title is still empty, fall back to preview!
+                # Antigravity Desktop App ONLY renders the 'title' column; empty title shows 'Untitled Conversation'!
+                if not title_val and preview_val:
+                    title_val = preview_val
+                    need_update = True
 
                 # Extract folder name
                 folder_name = ""
@@ -999,17 +1038,16 @@ def deduplicate_and_relink_projects() -> Dict[str, Any]:
                 target_uri = target_proj.get("folderUri") or (json.loads(ws_raw)[0] if ws_raw else "")
                 target_ws_raw = json.dumps([target_uri])
 
-                need_update = False
                 if curr_pid != target_pid or ws_raw != target_ws_raw:
                     need_update = True
 
                 if not raw_blob or len(raw_blob) == 0:
                     raw_blob = synthesize_raw_summary(
                         cid=cid,
-                        title=r["title"],
-                        preview=r["preview"],
-                        step_count=r["step_count"],
-                        mtime_str=r["last_modified_time"],
+                        title=title_val,
+                        preview=preview_val,
+                        step_count=steps_val or 1,
+                        mtime_str=mtime_val,
                         ws_raw=target_ws_raw,
                         pid=target_pid
                     )
@@ -1024,8 +1062,8 @@ def deduplicate_and_relink_projects() -> Dict[str, Any]:
 
                 if need_update:
                     cur.execute(
-                        "UPDATE conversation_summaries SET project_id = ?, workspace_uris = ?, raw_summary = ? WHERE conversation_id = ?",
-                        (target_pid, target_ws_raw, new_raw, cid)
+                        "UPDATE conversation_summaries SET title = ?, preview = ?, project_id = ?, workspace_uris = ?, raw_summary = ?, step_count = ?, last_modified_time = ? WHERE conversation_id = ?",
+                        (title_val, preview_val, target_pid, target_ws_raw, new_raw, steps_val or 0, mtime_val or "0001-01-01 00:00:00+00:00", cid)
                     )
                     relinked_sessions += 1
 
@@ -1366,6 +1404,10 @@ def import_sessions(
                         )
                     except Exception:
                         pass
+
+            # If title is empty in meta, fall back to preview so Antigravity Desktop App won't show 'Untitled Conversation'
+            if not (meta.get("title") or "").strip() and (meta.get("preview") or "").strip():
+                meta["title"] = meta["preview"].strip()
 
             # Normalize running status to IDLE for imported sessions
             if meta.get("status") == "CASCADE_RUN_STATUS_RUNNING":
