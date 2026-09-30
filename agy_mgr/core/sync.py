@@ -1017,6 +1017,19 @@ def export_sessions(
 
             # 4. Prepare and save meta.json
             meta_to_save = dict(row_dict)
+            if not raw_blob or len(raw_blob) == 0:
+                try:
+                    raw_blob = synthesize_raw_summary(
+                        cid=cid,
+                        title=row_dict.get("title"),
+                        preview=row_dict.get("preview"),
+                        step_count=row_dict.get("step_count"),
+                        mtime_str=row_dict.get("last_modified_time"),
+                        ws_raw=row_dict.get("workspace_uris"),
+                        pid=row_dict.get("project_id", "")
+                    )
+                except Exception:
+                    pass
             if raw_blob:
                 try:
                     meta_to_save["_raw_summary_b64"] = base64.b64encode(raw_blob).decode("ascii")
@@ -1098,15 +1111,26 @@ def import_sessions(
                 try:
                     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
                     cur = conn.cursor()
-                    cur.execute("SELECT last_modified_time FROM conversation_summaries WHERE conversation_id = ?", (cid,))
+                    cur.execute("SELECT last_modified_time, raw_summary FROM conversation_summaries WHERE conversation_id = ?", (cid,))
                     row = cur.fetchone()
                     conn.close()
                     if row:
                         local_exists = True
                         local_dt = parse_sqlite_timestamp(row[0])
+                        has_local_raw = row[1] is not None and len(row[1]) > 0
                         conv_db_local = find_local_conversation_db(cid)
-                        if local_dt and remote_dt and local_dt >= remote_dt and conv_db_local:
-                            local_newer = True
+                        has_remote_conv = (entry / "conversation.db").exists()
+                        has_remote_raw = bool(meta.get("_raw_summary_b64"))
+
+                        if local_dt and remote_dt and local_dt >= remote_dt:
+                            if has_remote_conv and not conv_db_local:
+                                local_newer = False
+                            elif has_remote_raw and not has_local_raw:
+                                local_newer = False
+                            elif conv_db_local:
+                                local_newer = True
+                            else:
+                                local_newer = True
                 except Exception:
                     pass
 
@@ -1167,6 +1191,19 @@ def import_sessions(
                         new_pid=target_proj["id"],
                         new_uri=target_uri
                     )
+                else:
+                    try:
+                        raw_bytes = synthesize_raw_summary(
+                            cid=cid,
+                            title=meta.get("title"),
+                            preview=meta.get("preview"),
+                            step_count=meta.get("step_count"),
+                            mtime_str=meta.get("last_modified_time"),
+                            ws_raw=json.dumps([target_uri]),
+                            pid=target_proj["id"]
+                        )
+                    except Exception:
+                        pass
 
             # Normalize running status to IDLE for imported sessions
             if meta.get("status") == "CASCADE_RUN_STATUS_RUNNING":
