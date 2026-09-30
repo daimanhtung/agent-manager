@@ -68,6 +68,204 @@ def init_db_if_needed(db_path: Path):
         pass
 
 
+def decode_proto(data: bytes) -> List[Any]:
+    """Decode protobuf wire format into a recursive tree of (tag, wire, val)."""
+    fields = []
+    i = 0
+    n = len(data)
+    while i < n:
+        key = 0
+        shift = 0
+        while True:
+            if i >= n:
+                return fields
+            b = data[i]
+            i += 1
+            key |= (b & 0x7F) << shift
+            if not (b & 0x80):
+                break
+            shift += 7
+        tag = key >> 3
+        wire = key & 0x07
+        if wire == 0:
+            val = 0
+            shift = 0
+            while True:
+                if i >= n:
+                    return fields
+                b = data[i]
+                i += 1
+                val |= (b & 0x7F) << shift
+                if not (b & 0x80):
+                    break
+                shift += 7
+            fields.append((tag, wire, val))
+        elif wire == 1:
+            if i + 8 > n:
+                return fields
+            val = data[i:i + 8]
+            i += 8
+            fields.append((tag, wire, val))
+        elif wire == 2:
+            length = 0
+            shift = 0
+            while True:
+                if i >= n:
+                    return fields
+                b = data[i]
+                i += 1
+                length |= (b & 0x7F) << shift
+                if not (b & 0x80):
+                    break
+                shift += 7
+            if i + length > n:
+                return fields
+            val = data[i:i + length]
+            i += length
+            try:
+                sub = decode_proto(val)
+                if encode_proto(sub) == val:
+                    fields.append((tag, wire, sub))
+                    continue
+            except Exception:
+                pass
+            fields.append((tag, wire, val))
+        elif wire == 5:
+            if i + 4 > n:
+                return fields
+            val = data[i:i + 4]
+            i += 4
+            fields.append((tag, wire, val))
+        else:
+            return fields
+    return fields
+
+
+def encode_varint(val: int) -> bytes:
+    """Encode an integer as a protobuf varint."""
+    res = bytearray()
+    while val > 0x7F:
+        res.append((val & 0x7F) | 0x80)
+        val >>= 7
+    res.append(val & 0x7F)
+    return bytes(res)
+
+
+def encode_proto(fields: List[Any]) -> bytes:
+    """Encode a parsed protobuf tree back into wire bytes."""
+    out = bytearray()
+    for tag, wire, val in fields:
+        key = (tag << 3) | wire
+        out.extend(encode_varint(key))
+        if wire == 0:
+            out.extend(encode_varint(val))
+        elif wire == 1 or wire == 5:
+            out.extend(val)
+        elif wire == 2:
+            if isinstance(val, list):
+                sub_bytes = encode_proto(val)
+                out.extend(encode_varint(len(sub_bytes)))
+                out.extend(sub_bytes)
+            elif isinstance(val, (bytes, bytearray)):
+                out.extend(encode_varint(len(val)))
+                out.extend(val)
+            else:
+                out.extend(encode_varint(0))
+    return bytes(out)
+
+
+def find_proto_uris(fields: List[Any]) -> List[bytes]:
+    """Find all string fields in protobuf tree that look like file:/// URIs."""
+    uris = set()
+    for tag, wire, val in fields:
+        if wire == 2:
+            if isinstance(val, list):
+                uris.update(find_proto_uris(val))
+            elif isinstance(val, (bytes, bytearray)):
+                try:
+                    s = val.decode("utf-8")
+                    if s.startswith("file:///"):
+                        uris.add(val)
+                except Exception:
+                    pass
+    return list(uris)
+
+
+def replace_in_proto_tree(fields: List[Any], replacements: List[tuple]) -> List[Any]:
+    """Recursively replace byte strings in length-delimited fields."""
+    new_fields = []
+    for tag, wire, val in fields:
+        if wire == 2:
+            if isinstance(val, list):
+                new_fields.append((tag, wire, replace_in_proto_tree(val, replacements)))
+            elif isinstance(val, (bytes, bytearray)):
+                v = val
+                for old_b, new_b in replacements:
+                    if old_b and new_b and old_b in v:
+                        v = v.replace(old_b, new_b)
+                new_fields.append((tag, wire, v))
+        else:
+            new_fields.append((tag, wire, val))
+    return new_fields
+
+
+def patch_protobuf_blob(
+    blob: Optional[bytes],
+    old_pid: Optional[str] = None,
+    new_pid: Optional[str] = None,
+    new_uri: Optional[str] = None
+) -> Optional[bytes]:
+    """Safely patch project ID and workspace URIs inside a raw protobuf blob."""
+    if not blob:
+        return blob
+    try:
+        tree = decode_proto(blob)
+        replacements = []
+        if old_pid and new_pid and old_pid != new_pid:
+            replacements.append((old_pid.encode("utf-8"), new_pid.encode("utf-8")))
+        if new_uri:
+            target_uri_b = new_uri.encode("utf-8")
+            existing_uris = find_proto_uris(tree)
+            for u in existing_uris:
+                if u != target_uri_b:
+                    replacements.append((u, target_uri_b))
+        if not replacements:
+            return blob
+        new_tree = replace_in_proto_tree(tree, replacements)
+        return encode_proto(new_tree)
+    except Exception:
+        if old_pid and new_pid and old_pid.encode() in blob:
+            return blob.replace(old_pid.encode(), new_pid.encode())
+        return blob
+
+
+def patch_conversation_db(cid: str, new_uri: Optional[str] = None):
+    """Patch trajectory_metadata_blob inside local conversation SQLite DB."""
+    if not new_uri:
+        return
+    for base_dir in [GEMINI_HOME / "antigravity", GEMINI_HOME / "antigravity-cli"]:
+        conv_file = base_dir / "conversations" / f"{cid}.db"
+        if not conv_file.exists():
+            continue
+        try:
+            conn = sqlite3.connect(conv_file, timeout=5.0)
+            cur = conn.cursor()
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='trajectory_metadata_blob'")
+            if cur.fetchone():
+                cur.execute("SELECT id, data FROM trajectory_metadata_blob")
+                rows = cur.fetchall()
+                for row_id, blob in rows:
+                    if blob:
+                        patched = patch_protobuf_blob(blob, new_uri=new_uri)
+                        if patched and patched != blob:
+                            cur.execute("UPDATE trajectory_metadata_blob SET data = ? WHERE id = ?", (patched, row_id))
+                conn.commit()
+                conn.execute("PRAGMA wal_checkpoint(PASSIVE);")
+            conn.close()
+        except Exception:
+            pass
+
+
 def find_local_brain_dir(conversation_id: str, app_data_dir: Optional[str] = None) -> Optional[Path]:
     """Find the local brain directory for a given conversation_id."""
     candidates = []
@@ -467,11 +665,12 @@ def deduplicate_and_relink_projects() -> Dict[str, Any]:
                 if curr_pid != target_pid or ws_raw != target_ws_raw:
                     need_update = True
 
-                new_raw = raw_blob
-                if raw_blob and curr_pid and target_pid and curr_pid != target_pid:
-                    if curr_pid.encode() in raw_blob:
-                        new_raw = raw_blob.replace(curr_pid.encode(), target_pid.encode())
-                        need_update = True
+                new_raw = patch_protobuf_blob(raw_blob, old_pid=curr_pid, new_pid=target_pid, new_uri=target_uri)
+                if new_raw != raw_blob:
+                    need_update = True
+
+                if target_uri:
+                    patch_conversation_db(cid, new_uri=target_uri)
 
                 if need_update:
                     cur.execute(
@@ -704,9 +903,17 @@ def import_sessions(
                 meta["project_id"] = target_proj["id"]
                 meta["workspace_uris"] = json.dumps([target_proj.get("folderUri") or local_folder.as_uri()])
 
-                if raw_bytes and old_pid and target_proj["id"] and old_pid != target_proj["id"]:
-                    if old_pid.encode() in raw_bytes:
-                        raw_bytes = raw_bytes.replace(old_pid.encode(), target_proj["id"].encode())
+                target_uri = target_proj.get("folderUri") or local_folder.as_uri()
+                meta["project_id"] = target_proj["id"]
+                meta["workspace_uris"] = json.dumps([target_uri])
+
+                if raw_bytes:
+                    raw_bytes = patch_protobuf_blob(
+                        raw_bytes,
+                        old_pid=old_pid,
+                        new_pid=target_proj["id"],
+                        new_uri=target_uri
+                    )
 
             # Normalize running status to IDLE for imported sessions
             if meta.get("status") == "CASCADE_RUN_STATUS_RUNNING":
