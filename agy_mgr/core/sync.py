@@ -121,7 +121,6 @@ def copy_brain_tree(src: Path, dst: Path):
             src_file = Path(root) / f
             dst_file = target_root / f
             try:
-                # Skip files larger than 50MB to keep sync fast and light
                 if src_file.stat().st_size > 50 * 1024 * 1024:
                     continue
                 if not dst_file.exists() or src_file.stat().st_mtime > dst_file.stat().st_mtime:
@@ -132,9 +131,9 @@ def copy_brain_tree(src: Path, dst: Path):
 
 def get_local_projects_map() -> Dict[str, Dict[str, Any]]:
     """
-    Read all local projects from ~/.gemini/config/projects/*.json and ~/.gemini/projects.json.
+    Read all local projects from ~/.gemini/config/projects/*.json.
     Maps lowercase project names and folder names to project info:
-    {"id": pid, "name": name, "folderUri": folderUri}
+    {"id": pid, "name": name, "folderUri": folderUri, "file": Path}
     """
     projects = {}
     p_dir = GEMINI_HOME / "config" / "projects"
@@ -153,11 +152,11 @@ def get_local_projects_map() -> Dict[str, Dict[str, Any]]:
                         furi = r["gitFolder"]["folderUri"]
                         break
                 if pid and pname:
-                    entry = {"id": pid, "name": pname, "folderUri": furi}
+                    entry = {"id": pid, "name": pname, "folderUri": furi, "file": f}
                     projects[pname.lower()] = entry
                 if pid and furi:
                     folder_name = Path(furi.replace("file://", "")).name.lower()
-                    entry = {"id": pid, "name": pname or folder_name, "folderUri": furi}
+                    entry = {"id": pid, "name": pname or folder_name, "folderUri": furi, "file": f}
                     projects[folder_name] = entry
             except Exception:
                 pass
@@ -221,28 +220,46 @@ def find_local_workspace_folder(ws_raw: str) -> Optional[Path]:
 
 def ensure_local_project_for_workspace(folder_path: Path) -> Dict[str, Any]:
     """
-    Ensure a project JSON exists in ~/.gemini/config/projects/ for the given local folder.
-    Returns {"id": pid, "name": name, "folderUri": folderUri}.
+    Ensure a single project JSON exists in ~/.gemini/config/projects/ for the given local folder.
+    NEVER creates duplicates if a project with the same name already exists!
     """
     p_dir = GEMINI_HOME / "config" / "projects"
     p_dir.mkdir(parents=True, exist_ok=True)
 
     folder_uri = folder_path.as_uri()
     folder_name = folder_path.name
+    folder_name_lower = folder_name.lower()
 
-    # Check if project already exists
+    # Check if a project with the same name or folderUri already exists
     for f in p_dir.glob("*.json"):
         if f.name in ("outside-of-project.json", "default-cli-project.json"):
             continue
         try:
             d = json.loads(f.read_text(encoding="utf-8"))
+            pid = d.get("id")
+            pname = d.get("name", "")
+
+            # Check matching folderUri
             for r in d.get("projectResources", {}).get("resources", []):
                 if r.get("gitFolder", {}).get("folderUri") == folder_uri:
-                    return {"id": d["id"], "name": d.get("name", folder_name), "folderUri": folder_uri}
+                    return {"id": pid, "name": pname or folder_name, "folderUri": folder_uri, "file": f}
+
+            # Check matching name
+            if pname and pname.lower() == folder_name_lower:
+                resources = d.get("projectResources", {}).get("resources", [])
+                if not resources or not resources[0].get("gitFolder", {}).get("folderUri"):
+                    d.setdefault("projectResources", {})["resources"] = [{
+                        "gitFolder": {
+                            "folderUri": folder_uri,
+                            "defaultBranch": "main"
+                        }
+                    }]
+                    f.write_text(json.dumps(d, indent=2, ensure_ascii=False), encoding="utf-8")
+                return {"id": pid, "name": pname, "folderUri": folder_uri, "file": f}
         except Exception:
             pass
 
-    # Create new project config
+    # Create new project config only if none exists
     new_pid = str(uuid.uuid4())
     proj_config = {
         "id": new_pid,
@@ -266,27 +283,144 @@ def ensure_local_project_for_workspace(folder_path: Path) -> Dict[str, Any]:
     target_file = p_dir / f"{new_pid}.json"
     target_file.write_text(json.dumps(proj_config, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    # Also update ~/.gemini/projects.json
-    p_json = GEMINI_HOME / "projects.json"
-    try:
-        pj_data = {"projects": {}}
-        if p_json.exists():
-            pj_data = json.loads(p_json.read_text(encoding="utf-8"))
-        pj_data.setdefault("projects", {})[str(folder_path)] = folder_name
-        p_json.write_text(json.dumps(pj_data, indent=2, ensure_ascii=False), encoding="utf-8")
-    except Exception:
-        pass
-
-    return {"id": new_pid, "name": folder_name, "folderUri": folder_uri}
+    return {"id": new_pid, "name": folder_name, "folderUri": folder_uri, "file": target_file}
 
 
-def relink_sessions_to_local_projects() -> Dict[str, Any]:
+def deduplicate_and_relink_projects() -> Dict[str, Any]:
     """
-    Retroactively scan all sessions in local SQLite DBs and ensure their
-    workspace_uris and project_id match the current machine's paths and projects.
-    This guarantees Antigravity Desktop App displays sessions in the matching open workspace.
+    Comprehensive fix for Antigravity Desktop App session display:
+    1. Merges any duplicate projects in ~/.gemini/config/projects/ (e.g. multiple 'devops').
+    2. Deletes duplicate project JSON files.
+    3. Cleans up app_storage.json (removes duplicates, uncollapses project sections).
+    4. Relinks all sessions in conversation_summaries.db to point to the primary project ID
+       and the local machine's folder URI.
+    5. Replaces old project UUID in raw_summary protobuf blobs.
+    6. Checkpoints SQLite WAL.
     """
-    relinked_count = 0
+    p_dir = GEMINI_HOME / "config" / "projects"
+    p_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Pre-calculate session counts per project ID
+    session_counts: Dict[str, int] = {}
+    for db_path in [APP_CONV_DB, CLI_CONV_DB]:
+        if db_path.exists():
+            try:
+                conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
+                cur = conn.cursor()
+                cur.execute("SELECT project_id, COUNT(*) FROM conversation_summaries GROUP BY project_id")
+                for row in cur.fetchall():
+                    if row[0]:
+                        session_counts[row[0]] = session_counts.get(row[0], 0) + row[1]
+                conn.close()
+            except Exception:
+                pass
+
+    # Group projects by lowercase name
+    by_name: Dict[str, List[Dict[str, Any]]] = {}
+    for f in p_dir.glob("*.json"):
+        if f.name in ("outside-of-project.json", "default-cli-project.json"):
+            continue
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+            name = (d.get("name") or "").strip().lower()
+            pid = d.get("id")
+            if not name or not pid:
+                continue
+
+            resources = d.get("projectResources", {}).get("resources", [])
+            furi = None
+            for r in resources:
+                if "gitFolder" in r and "folderUri" in r["gitFolder"]:
+                    furi = r["gitFolder"]["folderUri"]
+                    break
+
+            sess_count = session_counts.get(pid, 0)
+
+            by_name.setdefault(name, []).append({
+                "file": f,
+                "id": pid,
+                "data": d,
+                "folderUri": furi,
+                "session_count": sess_count,
+                "mtime": f.stat().st_mtime
+            })
+        except Exception:
+            pass
+
+    merged_ids: Dict[str, str] = {}
+    primary_projects: Dict[str, Dict[str, Any]] = {}
+    duplicates_removed = 0
+
+    for name, items in by_name.items():
+        if len(items) == 1:
+            primary_projects[name] = items[0]
+            continue
+
+        # Sort: project with most sessions first, then oldest mtime
+        items.sort(key=lambda x: (x["session_count"], -x["mtime"]), reverse=True)
+        primary = items[0]
+        primary_projects[name] = primary
+
+        for dup in items[1:]:
+            dup_id = dup["id"]
+            merged_ids[dup_id] = primary["id"]
+            try:
+                dup["file"].unlink(missing_ok=True)
+                duplicates_removed += 1
+            except Exception:
+                pass
+
+    # Ensure each primary project has a valid local folderUri
+    for name, proj in primary_projects.items():
+        if not proj.get("folderUri"):
+            local_folder = find_local_workspace_folder(json.dumps([f"file:///{name}"]))
+            if local_folder:
+                proj["folderUri"] = local_folder.as_uri()
+                proj["data"].setdefault("projectResources", {})["resources"] = [{
+                    "gitFolder": {
+                        "folderUri": local_folder.as_uri(),
+                        "defaultBranch": "main"
+                    }
+                }]
+                try:
+                    proj["file"].write_text(json.dumps(proj["data"], indent=2, ensure_ascii=False), encoding="utf-8")
+                except Exception:
+                    pass
+
+    # 2. Clean up ~/Library/Application Support/Antigravity/app_storage.json
+    app_storage = Path.home() / "Library" / "Application Support" / "Antigravity" / "app_storage.json"
+    if app_storage.exists():
+        try:
+            storage_data = json.loads(app_storage.read_text(encoding="utf-8"))
+            primary_ids = {p["id"] for p in primary_projects.values()}
+
+            if "projectsOrder" in storage_data:
+                order = json.loads(storage_data["projectsOrder"])
+                new_order = []
+                for pid in order:
+                    actual = merged_ids.get(pid, pid)
+                    if actual not in new_order and (actual in primary_ids or (p_dir / f"{actual}.json").exists()):
+                        new_order.append(actual)
+                for pid in primary_ids:
+                    if pid not in new_order:
+                        new_order.append(pid)
+                storage_data["projectsOrder"] = json.dumps(new_order)
+
+            # Uncollapse sections so they are expanded and visible in the sidebar!
+            if "sidebar_collapsed_sections" in storage_data:
+                collapsed = json.loads(storage_data["sidebar_collapsed_sections"])
+                new_collapsed = [
+                    pid for pid in collapsed
+                    if pid not in merged_ids and pid not in primary_ids
+                ]
+                storage_data["sidebar_collapsed_sections"] = json.dumps(new_collapsed)
+
+            app_storage.write_text(json.dumps(storage_data, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+
+    # 3. Relink all sessions in SQLite DBs
+    relinked_sessions = 0
     projects_map = get_local_projects_map()
 
     for db_path in [APP_CONV_DB, CLI_CONV_DB]:
@@ -302,32 +436,41 @@ def relink_sessions_to_local_projects() -> Dict[str, Any]:
             for r in rows:
                 cid = r["conversation_id"]
                 ws_raw = r["workspace_uris"]
-                old_pid = r["project_id"] or ""
+                curr_pid = r["project_id"] or ""
                 raw_blob = r["raw_summary"]
 
-                local_folder = find_local_workspace_folder(ws_raw)
-                if not local_folder:
+                # Extract folder name
+                folder_name = ""
+                if ws_raw:
+                    try:
+                        uris = json.loads(ws_raw)
+                        if uris:
+                            folder_name = Path(uris[0].replace("file://", "")).name.lower()
+                    except Exception:
+                        pass
+
+                target_proj = projects_map.get(folder_name)
+                if not target_proj and folder_name:
+                    local_folder = find_local_workspace_folder(ws_raw)
+                    if local_folder:
+                        target_proj = ensure_local_project_for_workspace(local_folder)
+                        projects_map[folder_name] = target_proj
+
+                if not target_proj:
                     continue
 
-                folder_name_lower = local_folder.name.lower()
-                target_proj = projects_map.get(folder_name_lower)
-                if not target_proj or not target_proj.get("id") or not target_proj.get("folderUri"):
-                    target_proj = ensure_local_project_for_workspace(local_folder)
-                    projects_map[folder_name_lower] = target_proj
-
                 target_pid = target_proj["id"]
-                target_uri = target_proj["folderUri"]
+                target_uri = target_proj.get("folderUri") or (json.loads(ws_raw)[0] if ws_raw else "")
                 target_ws_raw = json.dumps([target_uri])
 
                 need_update = False
-                if old_pid != target_pid or ws_raw != target_ws_raw:
+                if curr_pid != target_pid or ws_raw != target_ws_raw:
                     need_update = True
 
                 new_raw = raw_blob
-                if raw_blob and old_pid and target_pid and old_pid != target_pid:
-                    if old_pid.encode() in raw_blob:
-                        # 36-character UUID replacement preserves exact protobuf message length
-                        new_raw = raw_blob.replace(old_pid.encode(), target_pid.encode())
+                if raw_blob and curr_pid and target_pid and curr_pid != target_pid:
+                    if curr_pid.encode() in raw_blob:
+                        new_raw = raw_blob.replace(curr_pid.encode(), target_pid.encode())
                         need_update = True
 
                 if need_update:
@@ -335,15 +478,23 @@ def relink_sessions_to_local_projects() -> Dict[str, Any]:
                         "UPDATE conversation_summaries SET project_id = ?, workspace_uris = ?, raw_summary = ? WHERE conversation_id = ?",
                         (target_pid, target_ws_raw, new_raw, cid)
                     )
-                    relinked_count += 1
+                    relinked_sessions += 1
 
             conn.commit()
-            conn.execute("PRAGMA wal_checkpoint(FULL);")
+            conn.execute("PRAGMA wal_checkpoint(PASSIVE);")
             conn.close()
         except Exception:
             pass
 
-    return {"relinked": relinked_count}
+    return {
+        "duplicates_removed": duplicates_removed,
+        "relinked": relinked_sessions
+    }
+
+
+def relink_sessions_to_local_projects() -> Dict[str, Any]:
+    """Alias for deduplicate_and_relink_projects."""
+    return deduplicate_and_relink_projects()
 
 
 def export_sessions(
@@ -361,7 +512,6 @@ def export_sessions(
 
     stats = {"exported": 0, "skipped": 0, "errors": 0}
 
-    # Gather rows from both APP and CLI DBs
     rows_by_id = {}
     for db_path in [APP_CONV_DB, CLI_CONV_DB]:
         if not db_path.exists():
@@ -395,13 +545,11 @@ def export_sessions(
             sess_sync_dir = SYNC_DIR / cid
             meta_file = sess_sync_dir / "meta.json"
 
-            # Check if sync directory already has an equal or newer version
             if meta_file.exists() and not force:
                 try:
                     with open(meta_file, "r", encoding="utf-8") as f:
                         meta_data = json.load(f)
                     remote_dt = parse_sqlite_timestamp(meta_data.get("last_modified_time"))
-                    # If remote is newer and conversation.db exists in sync, we can skip
                     if remote_dt and local_dt and remote_dt >= local_dt and (sess_sync_dir / "conversation.db").exists():
                         stats["skipped"] += 1
                         continue
@@ -466,7 +614,6 @@ def import_sessions(
 
     stats = {"imported": 0, "updated": 0, "skipped": 0, "errors": 0}
 
-    # Ensure local DBs exist
     init_db_if_needed(APP_CONV_DB)
     init_db_if_needed(CLI_CONV_DB)
 
@@ -490,7 +637,6 @@ def import_sessions(
             remote_mtime = meta.get("last_modified_time")
             remote_dt = parse_sqlite_timestamp(remote_mtime)
 
-            # Check local status across both DBs
             local_exists = False
             local_newer = False
 
@@ -551,14 +697,13 @@ def import_sessions(
             if local_folder:
                 folder_name_lower = local_folder.name.lower()
                 target_proj = projects_map.get(folder_name_lower)
-                if not target_proj or not target_proj.get("id") or not target_proj.get("folderUri"):
+                if not target_proj or not target_proj.get("id"):
                     target_proj = ensure_local_project_for_workspace(local_folder)
                     projects_map[folder_name_lower] = target_proj
 
                 meta["project_id"] = target_proj["id"]
-                meta["workspace_uris"] = json.dumps([target_proj["folderUri"]])
+                meta["workspace_uris"] = json.dumps([target_proj.get("folderUri") or local_folder.as_uri()])
 
-                # Replace old project_id with local project_id in raw_summary blob
                 if raw_bytes and old_pid and target_proj["id"] and old_pid != target_proj["id"]:
                     if old_pid.encode() in raw_bytes:
                         raw_bytes = raw_bytes.replace(old_pid.encode(), target_proj["id"].encode())
@@ -568,7 +713,6 @@ def import_sessions(
                 meta["status"] = "IDLE"
             meta["not_fully_idle"] = 0
 
-            # Determine which DB to write to
             dbs_to_write = []
             if CLI_CONV_DB.parent.exists():
                 dbs_to_write.append(CLI_CONV_DB)
@@ -623,8 +767,8 @@ def import_sessions(
         except Exception:
             stats["errors"] += 1
 
-    # After importing, run retroactive relink across all sessions in local DB
-    relink_sessions_to_local_projects()
+    # Run deduplication and relinking across all sessions
+    deduplicate_and_relink_projects()
 
     return stats
 
@@ -634,18 +778,19 @@ def sync_all(limit: int = 50, force: bool = False) -> Dict[str, Any]:
     Full 2-way synchronization:
     1. Import newer/missing sessions from SYNC_DIR (coming from other devices via Syncthing).
     2. Export local sessions to SYNC_DIR (pushing updates to other devices).
-    3. Relink sessions to local project paths.
+    3. Deduplicate and relink sessions to local project paths.
     """
     import_stats = import_sessions(force=force)
     export_stats = export_sessions(limit=limit, force=force)
-    relink_stats = relink_sessions_to_local_projects()
+    relink_stats = deduplicate_and_relink_projects()
 
     return {
         "imported": import_stats["imported"],
         "updated": import_stats["updated"],
         "exported": export_stats["exported"],
         "skipped": export_stats["skipped"],
-        "relinked": relink_stats["relinked"],
+        "relinked": relink_stats.get("relinked", 0),
+        "duplicates_removed": relink_stats.get("duplicates_removed", 0),
         "errors": import_stats["errors"] + export_stats["errors"]
     }
 
@@ -684,7 +829,6 @@ def get_sync_status() -> Dict[str, Any]:
                 except Exception:
                     pass
 
-    # Read local sessions
     local_sessions = {}
     for db_path in [APP_CONV_DB, CLI_CONV_DB]:
         if not db_path.exists():
