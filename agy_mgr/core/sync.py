@@ -648,6 +648,10 @@ def copy_brain_tree(src: Path, dst: Path):
             try:
                 if src_file.stat().st_size > 50 * 1024 * 1024:
                     continue
+                # For transcript files, NEVER overwrite if destination has more or equal bytes!
+                if f in ("transcript.jsonl", "transcript_full.jsonl") and dst_file.exists():
+                    if dst_file.stat().st_size >= src_file.stat().st_size:
+                        continue
                 if not dst_file.exists() or src_file.stat().st_mtime > dst_file.stat().st_mtime:
                     shutil.copy2(src_file, dst_file)
             except Exception:
@@ -1376,7 +1380,7 @@ def import_sessions(
                 stats["skipped"] += 1
                 continue
 
-            # 1. Copy conversation.db to conversations/ folders
+            # 1. Copy conversation.db to conversations/ folders safely
             conv_db_src = entry / "conversation.db"
             if conv_db_src.exists():
                 for base in [GEMINI_HOME / "antigravity", GEMINI_HOME / "antigravity-cli"]:
@@ -1384,9 +1388,40 @@ def import_sessions(
                         conv_dir = base / "conversations"
                         conv_dir.mkdir(parents=True, exist_ok=True)
                         dest_db = conv_dir / f"{cid}.db"
-                        shutil.copy2(conv_db_src, dest_db)
-                        (conv_dir / f"{cid}.db-wal").unlink(missing_ok=True)
-                        (conv_dir / f"{cid}.db-shm").unlink(missing_ok=True)
+
+                        # SAFETY CHECK: Compare step counts before overwriting!
+                        should_copy_db = True
+                        if dest_db.exists():
+                            # Safely checkpoint local WAL first
+                            try:
+                                chk = sqlite3.connect(f"file:{dest_db}?mode=rw", uri=True, timeout=3.0)
+                                chk.execute("PRAGMA wal_checkpoint(FULL);")
+                                chk.close()
+                            except Exception:
+                                pass
+
+                            local_cnt = 0
+                            remote_cnt = 0
+                            try:
+                                c_loc = sqlite3.connect(f"file:{dest_db}?mode=ro", uri=True, timeout=2.0)
+                                local_cnt = c_loc.execute("SELECT COUNT(*) FROM steps").fetchone()[0]
+                                c_loc.close()
+                            except Exception:
+                                pass
+                            try:
+                                c_rem = sqlite3.connect(f"file:{conv_db_src}?mode=ro", uri=True, timeout=2.0)
+                                remote_cnt = c_rem.execute("SELECT COUNT(*) FROM steps").fetchone()[0]
+                                c_rem.close()
+                            except Exception:
+                                pass
+
+                            # If local has equal or more steps, NEVER overwrite it!
+                            if local_cnt >= remote_cnt and local_cnt > 0:
+                                should_copy_db = False
+
+                        if should_copy_db:
+                            shutil.copy2(conv_db_src, dest_db)
+                            # NEVER delete .db-wal or .db-shm!
 
             # 2. Copy annotation.pbtxt to annotations/ folders
             ann_src = entry / "annotation.pbtxt"
