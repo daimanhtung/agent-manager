@@ -1259,11 +1259,19 @@ def auto_import_synced_sessions():
     """
     Lightweight, silent auto-import of newly received Syncthing sessions.
     Called automatically when listing or resuming sessions.
+    Also ensures agyhub_summaries_proto.pb is patched to include all DB sessions.
     """
     try:
         if not SYNC_DIR.exists():
             return
         import_sessions()
+    except Exception:
+        pass
+
+    # Always patch agyhub_summaries_proto.pb to ensure App sidebar shows all sessions
+    try:
+        projects_map = get_local_projects_map()
+        patch_agyhub_summaries_pb(projects_map)
     except Exception:
         pass
 
