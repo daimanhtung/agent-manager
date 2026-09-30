@@ -452,15 +452,19 @@ def patch_agyhub_summaries_pb(projects_map: Dict[str, Dict[str, Any]]):
                         pid = r[1]
                         ws = r[2]
                         raw_blob = r[3]
+                        title_val = r[4]
+                        preview_val = r[5]
+                        clean_title = (title_val or preview_val or "Untitled Conversation").strip()
                         if cid and pid:
                             uris = json.loads(ws) if ws else []
                             uri = uris[0] if uris else None
                             if not raw_blob or len(raw_blob) == 0:
-                                raw_blob = synthesize_raw_summary(cid, r[4], r[5], r[6], r[7], ws, pid)
+                                raw_blob = synthesize_raw_summary(cid, clean_title, preview_val, r[6], r[7], ws, pid)
                             db_map[cid] = {
                                 "pid": pid,
                                 "uri": uri,
-                                "raw": raw_blob
+                                "raw": raw_blob,
+                                "title": clean_title
                             }
                     conn.close()
                 except Exception:
@@ -482,21 +486,28 @@ def patch_agyhub_summaries_pb(projects_map: Dict[str, Dict[str, Any]]):
 
             target_pid = None
             target_uri = None
+            target_title = "Untitled Conversation"
             if cid and cid in db_map:
                 seen_cids.add(cid)
                 target_pid = db_map[cid]["pid"]
                 target_uri = db_map[cid]["uri"]
+                target_title = db_map[cid]["title"]
             else:
                 return None
 
             target_pid_b = target_pid.encode("utf-8") if target_pid else None
             target_uri_b = target_uri.encode("utf-8") if target_uri else None
+            target_title_b = target_title.encode("utf-8")
 
             def patch_tag2(sub2_list):
                 new_sub2 = []
+                has_tag1 = False
                 for s in sub2_list:
                     tag, wire, val = s
-                    if tag == 4 and isinstance(val, (bytes, bytearray)) and target_pid_b:
+                    if tag == 1 and isinstance(val, (bytes, bytearray)):
+                        has_tag1 = True
+                        new_sub2.append((tag, wire, target_title_b))
+                    elif tag == 4 and isinstance(val, (bytes, bytearray)) and target_pid_b:
                         new_sub2.append((tag, wire, target_pid_b))
                     elif tag == 17 and isinstance(val, list):
                         new_17 = []
@@ -543,6 +554,10 @@ def patch_agyhub_summaries_pb(projects_map: Dict[str, Dict[str, Any]]):
                         new_sub2.append((tag, wire, new_9))
                     else:
                         new_sub2.append(s)
+
+                if not has_tag1:
+                    new_sub2.insert(0, (1, 2, target_title_b))
+
                 return new_sub2
 
             new_subs = []
@@ -562,6 +577,9 @@ def patch_agyhub_summaries_pb(projects_map: Dict[str, Dict[str, Any]]):
             if cid not in seen_cids and info.get("raw"):
                 try:
                     raw_tree = decode_proto(info["raw"])
+                    has_t1 = any(t[0] == 1 for t in raw_tree)
+                    if not has_t1 and info.get("title"):
+                        raw_tree.insert(0, (1, 2, info["title"].encode("utf-8")))
                     new_tree.append((1, 2, [
                         (1, 2, cid.encode("utf-8")),
                         (2, 2, raw_tree)
@@ -806,6 +824,17 @@ def deduplicate_and_relink_projects() -> Dict[str, Any]:
     """
     p_dir = GEMINI_HOME / "config" / "projects"
     p_dir.mkdir(parents=True, exist_ok=True)
+
+    # 0. Populate empty titles from preview if available
+    for db_path in [APP_CONV_DB, CLI_CONV_DB]:
+        if db_path.exists():
+            try:
+                conn = sqlite3.connect(db_path, timeout=5.0)
+                conn.execute('UPDATE conversation_summaries SET title = preview WHERE (title = "" OR title IS NULL) AND (preview != "" AND preview IS NOT NULL);')
+                conn.commit()
+                conn.close()
+            except Exception:
+                pass
 
     # 1. Pre-calculate session counts per project ID
     session_counts: Dict[str, int] = {}
