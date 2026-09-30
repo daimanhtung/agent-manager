@@ -185,6 +185,50 @@ def export_sessions(
     return stats
 
 
+def adapt_workspace_uris_for_local_machine(ws_raw: str) -> str:
+    """
+    Adapt workspace URIs from a remote machine so that Antigravity Desktop App
+    on the current machine matches the workspace and displays the session in the sidebar.
+    """
+    if not ws_raw:
+        return ws_raw
+    try:
+        uris = json.loads(ws_raw)
+        if not isinstance(uris, list) or not uris:
+            return ws_raw
+
+        adapted_uris = list(uris)
+        home = Path.home()
+
+        for uri in uris:
+            if not uri.startswith("file://"):
+                continue
+            path_str = uri.replace("file://", "")
+            remote_path = Path(path_str)
+            basename = remote_path.name
+
+            # 1. Match current repository (e.g. agent-manager)
+            if basename == REPO_DIR.name:
+                local_repo_uri = REPO_DIR.as_uri()
+                if local_repo_uri not in adapted_uris:
+                    adapted_uris.insert(0, local_repo_uri)
+
+            # 2. Check if the subpath relative to user home exists locally
+            parts = remote_path.parts
+            for i in range(1, len(parts)):
+                subpath = Path(*parts[i:])
+                cand = home / subpath
+                if cand.exists() and cand.is_dir():
+                    cand_uri = cand.as_uri()
+                    if cand_uri not in adapted_uris:
+                        adapted_uris.insert(0, cand_uri)
+                    break
+
+        return json.dumps(adapted_uris)
+    except Exception:
+        return ws_raw
+
+
 def import_sessions(
     session_ids: Optional[List[str]] = None,
     force: bool = False
@@ -244,6 +288,15 @@ def import_sessions(
             if local_newer and not force:
                 stats["skipped"] += 1
                 continue
+
+            # Adapt workspace URIs so the local Antigravity App matches the open folder
+            if "workspace_uris" in meta:
+                meta["workspace_uris"] = adapt_workspace_uris_for_local_machine(meta["workspace_uris"])
+
+            # Normalize running status to IDLE for imported sessions
+            if meta.get("status") == "CASCADE_RUN_STATUS_RUNNING":
+                meta["status"] = "IDLE"
+            meta["not_fully_idle"] = 0
 
             # Determine which DB to write to (write to both if both parent dirs exist, or appropriate one)
             dbs_to_write = []
