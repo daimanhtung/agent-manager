@@ -225,8 +225,11 @@ def cmd_completion(args):
 def cmd_sync(args):
     action = getattr(args, "sync_action", None)
     force = getattr(args, "force", False)
-    limit = getattr(args, "limit", 50)
+    limit = getattr(args, "limit", 0)
+    if getattr(args, "all", False):
+        limit = 0
     sess_id = getattr(args, "id", None)
+    project = getattr(args, "project", None)
 
     if action in ("status", "st"):
         st = get_sync_status()
@@ -235,13 +238,17 @@ def cmd_sync(args):
 
     if action in ("push", "export"):
         print(f"\n[*] Đang xuất session ra kho đồng bộ Syncthing...")
-        res = export_sessions(session_ids=[sess_id] if sess_id else None, limit=limit, force=force)
+        if project:
+            print(f"[*] Lọc theo project: {BOLD}{project}{RESET}")
+        res = export_sessions(session_ids=[sess_id] if sess_id else None, limit=limit, force=force, project=project)
         print(f"{GREEN}[✓] Hoàn tất:{RESET} {BOLD}{res['exported']}{RESET} session được xuất, {DIM}{res['skipped']}{RESET} bỏ qua (đã mới nhất).\n")
         return
 
     if action in ("pull", "import"):
         print(f"\n[*] Đang nhập session từ kho đồng bộ Syncthing...")
-        res = import_sessions(session_ids=[sess_id] if sess_id else None, force=force)
+        if project:
+            print(f"[*] Lọc theo project: {BOLD}{project}{RESET}")
+        res = import_sessions(session_ids=[sess_id] if sess_id else None, force=force, project=project)
         print(f"{GREEN}[✓] Hoàn tất:{RESET} {BOLD}{res['imported']}{RESET} session mới, {BOLD}{res['updated']}{RESET} đã cập nhật, {DIM}{res['skipped']}{RESET} bỏ qua.\n")
         return
 
@@ -254,7 +261,9 @@ def cmd_sync(args):
 
     # Default: 2-way sync
     print(f"\n[*] Đang đồng bộ session 2 chiều (Syncthing / Repo)...")
-    res = sync_all(limit=limit, force=force)
+    if project:
+        print(f"[*] Lọc theo project: {BOLD}{project}{RESET}")
+    res = sync_all(limit=limit, force=force, project=project)
     relinked_info = f" | {CYAN}{res.get('relinked', 0)}{RESET} đã ánh xạ project" if res.get('relinked') else ""
     print(
         f"{GREEN}[✓] Đồng bộ thành công:{RESET} "
@@ -328,7 +337,9 @@ def main():
     p_sync = subparsers.add_parser("sync", help="Đồng bộ session giữa các thiết bị (qua Syncthing / Repo)")
     p_sync.add_argument("sync_action", nargs="?", choices=["push", "export", "pull", "import", "status", "st", "relink", "repair", "fix"], help="Hành động: push (xuất), pull (nhập), status (kiểm tra), relink (ánh xạ lại project). Mặc định là đồng bộ 2 chiều")
     p_sync.add_argument("--id", help="Chỉ đồng bộ một session ID cụ thể")
-    p_sync.add_argument("--limit", "-n", type=int, default=50, help="Số session gần nhất cần đồng bộ (mặc định: 50)")
+    p_sync.add_argument("--limit", "-n", type=int, default=0, help="Số session gần nhất cần đồng bộ (mặc định: 0 = toàn bộ)")
+    p_sync.add_argument("--all", "-a", action="store_true", help="Đồng bộ toàn bộ session không giới hạn số lượng")
+    p_sync.add_argument("--project", "-p", help="Lọc đồng bộ theo tên project hoặc workspace (ví dụ: devops)")
     p_sync.add_argument("--force", "-f", action="store_true", help="Ghi đè ngay cả khi bản hiện tại bằng hoặc mới hơn")
     p_sync.set_defaults(func=cmd_sync)
 

@@ -286,26 +286,107 @@ def patch_agyhub_summaries_pb(projects_map: Dict[str, Dict[str, Any]]):
     if not pb_file.exists():
         return
     try:
+        db_map = {}
+        for db_path in [APP_CONV_DB, CLI_CONV_DB]:
+            if db_path.exists():
+                try:
+                    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
+                    cur = conn.cursor()
+                    cur.execute("SELECT conversation_id, project_id, workspace_uris FROM conversation_summaries")
+                    for r in cur.fetchall():
+                        if r[0] and r[1]:
+                            uris = json.loads(r[2]) if r[2] else []
+                            uri = uris[0] if uris else None
+                            db_map[r[0]] = (r[1], uri)
+                    conn.close()
+                except Exception:
+                    pass
+
         pb_data = pb_file.read_bytes()
-        pbtree = decode_proto(pb_data)
-        puris = find_proto_uris(pbtree)
-        pbreps = []
-        for u in puris:
-            u_str = u.decode("utf-8", errors="ignore")
-            fname = Path(u_str.replace("file://", "")).name.lower()
-            if fname in projects_map:
-                turi = projects_map[fname].get("folderUri")
-                if turi and u != turi.encode("utf-8"):
-                    pbreps.append((u, turi.encode("utf-8")))
+        tree = decode_proto(pb_data)
 
-        if "devops" in projects_map:
-            devops_pid = projects_map["devops"]["id"]
-            if b"72969541-f821-4f8f-85e5-d29878f9ad82" in pb_data:
-                pbreps.append((b"72969541-f821-4f8f-85e5-d29878f9ad82", devops_pid.encode("utf-8")))
+        def patch_item(item):
+            if item[0] != 1 or not isinstance(item[2], list):
+                return item
+            cid = None
+            for sub in item[2]:
+                if sub[0] == 1 and isinstance(sub[2], bytes):
+                    cid = sub[2].decode(errors="ignore")
+                    break
 
-        if pbreps:
-            npb = encode_proto(replace_in_proto_tree(pbtree, pbreps))
-            pb_file.write_bytes(npb)
+            target_pid = None
+            target_uri = None
+            if cid and cid in db_map:
+                target_pid, target_uri = db_map[cid]
+
+            target_pid_b = target_pid.encode("utf-8") if target_pid else None
+            target_uri_b = target_uri.encode("utf-8") if target_uri else None
+
+            def patch_tag2(sub2_list):
+                new_sub2 = []
+                for s in sub2_list:
+                    tag, wire, val = s
+                    if tag == 4 and isinstance(val, (bytes, bytearray)) and target_pid_b:
+                        new_sub2.append((tag, wire, target_pid_b))
+                    elif tag == 17 and isinstance(val, list):
+                        new_17 = []
+                        for s17 in val:
+                            t17, w17, v17 = s17
+                            if t17 == 18 and isinstance(v17, (bytes, bytearray)) and target_pid_b:
+                                new_17.append((t17, w17, target_pid_b))
+                            elif t17 in (1, 7) and isinstance(v17, (bytes, bytearray)) and v17.startswith(b"file://"):
+                                uri_to_use = target_uri_b
+                                if not uri_to_use:
+                                    fname = Path(v17.decode("utf-8", errors="ignore").replace("file://", "")).name.lower()
+                                    if fname in projects_map and projects_map[fname].get("folderUri"):
+                                        uri_to_use = projects_map[fname]["folderUri"].encode("utf-8")
+                                new_17.append((t17, w17, uri_to_use or v17))
+                            elif t17 == 1 and isinstance(v17, list):
+                                new_sub1 = []
+                                for n1 in v17:
+                                    if n1[0] in (1, 2) and isinstance(n1[2], (bytes, bytearray)) and n1[2].startswith(b"file://"):
+                                        uri_to_use = target_uri_b
+                                        if not uri_to_use:
+                                            fname = Path(n1[2].decode("utf-8", errors="ignore").replace("file://", "")).name.lower()
+                                            if fname in projects_map and projects_map[fname].get("folderUri"):
+                                                uri_to_use = projects_map[fname]["folderUri"].encode("utf-8")
+                                        new_sub1.append((n1[0], n1[1], uri_to_use or n1[2]))
+                                    else:
+                                        new_sub1.append(n1)
+                                new_17.append((t17, w17, new_sub1))
+                            else:
+                                new_17.append(s17)
+                        new_sub2.append((tag, wire, new_17))
+                    elif tag == 9 and isinstance(val, list):
+                        new_9 = []
+                        for s9 in val:
+                            t9, w9, v9 = s9
+                            if t9 in (1, 2) and isinstance(v9, (bytes, bytearray)) and v9.startswith(b"file://"):
+                                uri_to_use = target_uri_b
+                                if not uri_to_use:
+                                    fname = Path(v9.decode("utf-8", errors="ignore").replace("file://", "")).name.lower()
+                                    if fname in projects_map and projects_map[fname].get("folderUri"):
+                                        uri_to_use = projects_map[fname]["folderUri"].encode("utf-8")
+                                new_9.append((t9, w9, uri_to_use or v9))
+                            else:
+                                new_9.append(s9)
+                        new_sub2.append((tag, wire, new_9))
+                    else:
+                        new_sub2.append(s)
+                return new_sub2
+
+            new_subs = []
+            for sub in item[2]:
+                tag, wire, val = sub
+                if tag == 2 and isinstance(val, list):
+                    new_subs.append((tag, wire, patch_tag2(val)))
+                else:
+                    new_subs.append(sub)
+            return (item[0], item[1], new_subs)
+
+        new_tree = [patch_item(it) for it in tree]
+        new_pb = encode_proto(new_tree)
+        pb_file.write_bytes(new_pb)
     except Exception:
         pass
 
@@ -745,8 +826,9 @@ def relink_sessions_to_local_projects() -> Dict[str, Any]:
 
 def export_sessions(
     session_ids: Optional[List[str]] = None,
-    limit: int = 50,
-    force: bool = False
+    limit: int = 0,
+    force: bool = False,
+    project: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Export local sessions, conversation DBs, annotations, and brain data
@@ -767,12 +849,31 @@ def export_sessions(
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cols_str = ", ".join([f"`{c}`" for c in DB_COLUMNS])
-            query = f"SELECT {cols_str}, raw_summary FROM conversation_summaries ORDER BY last_modified_time DESC LIMIT ?"
-            cursor.execute(query, (limit if not session_ids else 500,))
+            query = f"SELECT {cols_str}, raw_summary FROM conversation_summaries ORDER BY last_modified_time DESC"
+            if limit and limit > 0 and not session_ids:
+                query += " LIMIT ?"
+                cursor.execute(query, (limit,))
+            else:
+                cursor.execute(query)
             for r in cursor.fetchall():
                 cid = r["conversation_id"]
                 if session_ids and cid not in session_ids and not any(cid.startswith(s) for s in session_ids):
                     continue
+                if project:
+                    ws_raw = r["workspace_uris"] or ""
+                    matched_project = False
+                    try:
+                        uris = json.loads(ws_raw)
+                        for u in uris:
+                            folder = Path(u.replace("file://", "")).name.lower()
+                            if project.lower() == folder or project.lower() in u.lower():
+                                matched_project = True
+                                break
+                    except Exception:
+                        if project.lower() in ws_raw.lower():
+                            matched_project = True
+                    if not matched_project:
+                        continue
                 dt = parse_sqlite_timestamp(r["last_modified_time"])
                 row_d = dict(r)
                 raw_blob = row_d.pop("raw_summary", None)
@@ -848,7 +949,8 @@ def export_sessions(
 
 def import_sessions(
     session_ids: Optional[List[str]] = None,
-    force: bool = False
+    force: bool = False,
+    project: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Import sessions from the repository sync folder (SYNC_DIR) into the local Antigravity environment.
@@ -879,6 +981,22 @@ def import_sessions(
         try:
             with open(meta_file, "r", encoding="utf-8") as f:
                 meta = json.load(f)
+
+            if project:
+                ws_raw_chk = meta.get("workspace_uris", "")
+                matched_p = False
+                try:
+                    uris = json.loads(ws_raw_chk)
+                    for u in uris:
+                        fld = Path(u.replace("file://", "")).name.lower()
+                        if project.lower() == fld or project.lower() in u.lower():
+                            matched_p = True
+                            break
+                except Exception:
+                    if project.lower() in ws_raw_chk.lower():
+                        matched_p = True
+                if not matched_p:
+                    continue
 
             remote_mtime = meta.get("last_modified_time")
             remote_dt = parse_sqlite_timestamp(remote_mtime)
@@ -1027,22 +1145,22 @@ def import_sessions(
     return stats
 
 
-def sync_all(limit: int = 50, force: bool = False) -> Dict[str, Any]:
+def sync_all(limit: int = 0, force: bool = False, project: Optional[str] = None) -> Dict[str, Any]:
     """
     Full 2-way synchronization:
     1. Import newer/missing sessions from SYNC_DIR (coming from other devices via Syncthing).
     2. Export local sessions to SYNC_DIR (pushing updates to other devices).
     3. Deduplicate and relink sessions to local project paths.
     """
-    import_stats = import_sessions(force=force)
-    export_stats = export_sessions(limit=limit, force=force)
+    import_stats = import_sessions(force=force, project=project)
+    export_stats = export_sessions(limit=limit, force=force, project=project)
     relink_stats = deduplicate_and_relink_projects()
 
     return {
         "imported": import_stats["imported"],
         "updated": import_stats["updated"],
         "exported": export_stats["exported"],
-        "skipped": export_stats["skipped"],
+        "skipped": export_stats["skipped"] + import_stats["skipped"],
         "relinked": relink_stats.get("relinked", 0),
         "duplicates_removed": relink_stats.get("duplicates_removed", 0),
         "errors": import_stats["errors"] + export_stats["errors"]
