@@ -504,9 +504,9 @@ def patch_agyhub_summaries_pb(projects_map: Dict[str, Dict[str, Any]]):
                 has_tag1 = False
                 for s in sub2_list:
                     tag, wire, val = s
-                    if tag == 1 and isinstance(val, (bytes, bytearray)):
+                    if tag == 1:
                         has_tag1 = True
-                        new_sub2.append((tag, wire, target_title_b))
+                        new_sub2.append((1, 2, target_title_b))
                     elif tag == 4 and isinstance(val, (bytes, bytearray)) and target_pid_b:
                         new_sub2.append((tag, wire, target_pid_b))
                     elif tag == 17 and isinstance(val, list):
@@ -830,6 +830,13 @@ def deduplicate_and_relink_projects() -> Dict[str, Any]:
         if db_path.exists():
             try:
                 conn = sqlite3.connect(db_path, timeout=5.0)
+                # Purge ghost sessions (0 steps and no title/preview)
+                conn.execute("""
+                    DELETE FROM conversation_summaries
+                    WHERE (step_count = 0 OR step_count IS NULL)
+                      AND (title = '' OR title IS NULL)
+                      AND (preview = '' OR preview IS NULL);
+                """)
                 conn.execute('UPDATE conversation_summaries SET title = preview WHERE (title = "" OR title IS NULL) AND (preview != "" AND preview IS NOT NULL);')
                 conn.commit()
                 conn.close()
@@ -1156,6 +1163,20 @@ def export_sessions(
 
     for cid, (row_dict, raw_blob, local_dt) in rows_by_id.items():
         try:
+            # Skip ghost sessions (0 steps and no title/preview)
+            step_cnt = row_dict.get("step_count", 0)
+            t_val = (row_dict.get("title") or "").strip()
+            p_val = (row_dict.get("preview") or "").strip()
+            if (not step_cnt or step_cnt <= 0) and not t_val and not p_val:
+                stats["skipped"] += 1
+                continue
+
+            # Standardize title and preview
+            if not t_val and p_val:
+                row_dict["title"] = p_val
+            elif not p_val and t_val:
+                row_dict["preview"] = t_val
+
             sess_sync_dir = SYNC_DIR / cid
             meta_file = sess_sync_dir / "meta.json"
 
@@ -1276,6 +1297,20 @@ def import_sessions(
         try:
             with open(meta_file, "r", encoding="utf-8") as f:
                 meta = json.load(f)
+
+            # Skip ghost sessions (0 steps and no title/preview)
+            step_cnt = meta.get("step_count", 0)
+            t_val = (meta.get("title") or "").strip()
+            p_val = (meta.get("preview") or "").strip()
+            if (not step_cnt or step_cnt <= 0) and not t_val and not p_val:
+                stats["skipped"] += 1
+                continue
+
+            # Standardize title and preview
+            if not t_val and p_val:
+                meta["title"] = p_val
+            elif not p_val and t_val:
+                meta["preview"] = t_val
 
             if project:
                 ws_raw_chk = meta.get("workspace_uris", "")
