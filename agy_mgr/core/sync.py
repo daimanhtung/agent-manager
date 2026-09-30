@@ -280,8 +280,57 @@ def patch_conversation_db(cid: str, new_uri: Optional[str] = None, new_pid: Opti
             pass
 
 
+def synthesize_raw_summary(
+    cid: str,
+    title: Optional[str],
+    preview: Optional[str],
+    step_count: Optional[int],
+    mtime_str: Optional[str],
+    ws_raw: Optional[str],
+    pid: str
+) -> bytes:
+    """Synthesize a valid protobuf raw_summary BLOB from conversation metadata."""
+    text = (title or preview or "Untitled").encode("utf-8")
+    dt = parse_sqlite_timestamp(mtime_str) or datetime.now(timezone.utc)
+    ts = int(dt.timestamp())
+    pid_b = pid.encode("utf-8") if pid else b""
+    try:
+        uris = json.loads(ws_raw) if ws_raw else []
+        uri = uris[0] if uris else ""
+    except Exception:
+        uri = ""
+    uri_b = uri.encode("utf-8")
+
+    time_proto = [(1, 0, ts), (2, 0, 0)]
+    tag17 = [
+        (6, 2, cid.encode("utf-8")),
+        (7, 2, uri_b),
+        (18, 2, pid_b)
+    ]
+    if uri_b:
+        tag17.insert(0, (1, 2, [(1, 2, uri_b)]))
+
+    tag9 = []
+    if uri_b:
+        tag9.append((1, 2, uri_b))
+
+    fields = [
+        (1, 2, text),
+        (2, 0, step_count or 1),
+        (3, 2, time_proto),
+        (4, 2, pid_b),
+        (5, 0, 1),
+        (7, 2, time_proto),
+        (9, 2, tag9),
+        (10, 2, time_proto),
+        (17, 2, tag17),
+        (22, 0, 4)
+    ]
+    return encode_proto(fields)
+
+
 def patch_agyhub_summaries_pb(projects_map: Dict[str, Dict[str, Any]]):
-    """Patch agyhub_summaries_proto.pb to map all foreign URIs and project IDs to local ones."""
+    """Patch agyhub_summaries_proto.pb to map all foreign URIs and project IDs to local ones, and add missing sessions."""
     pb_file = GEMINI_HOME / "antigravity" / "agyhub_summaries_proto.pb"
     if not pb_file.exists():
         return
@@ -292,18 +341,30 @@ def patch_agyhub_summaries_pb(projects_map: Dict[str, Dict[str, Any]]):
                 try:
                     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
                     cur = conn.cursor()
-                    cur.execute("SELECT conversation_id, project_id, workspace_uris FROM conversation_summaries")
+                    cur.execute("SELECT conversation_id, project_id, workspace_uris, raw_summary, title, preview, step_count, last_modified_time FROM conversation_summaries")
                     for r in cur.fetchall():
-                        if r[0] and r[1]:
-                            uris = json.loads(r[2]) if r[2] else []
+                        cid = r[0]
+                        pid = r[1]
+                        ws = r[2]
+                        raw_blob = r[3]
+                        if cid and pid:
+                            uris = json.loads(ws) if ws else []
                             uri = uris[0] if uris else None
-                            db_map[r[0]] = (r[1], uri)
+                            if not raw_blob or len(raw_blob) == 0:
+                                raw_blob = synthesize_raw_summary(cid, r[4], r[5], r[6], r[7], ws, pid)
+                            db_map[cid] = {
+                                "pid": pid,
+                                "uri": uri,
+                                "raw": raw_blob
+                            }
                     conn.close()
                 except Exception:
                     pass
 
         pb_data = pb_file.read_bytes()
         tree = decode_proto(pb_data)
+
+        seen_cids = set()
 
         def patch_item(item):
             if item[0] != 1 or not isinstance(item[2], list):
@@ -317,7 +378,9 @@ def patch_agyhub_summaries_pb(projects_map: Dict[str, Dict[str, Any]]):
             target_pid = None
             target_uri = None
             if cid and cid in db_map:
-                target_pid, target_uri = db_map[cid]
+                seen_cids.add(cid)
+                target_pid = db_map[cid]["pid"]
+                target_uri = db_map[cid]["uri"]
 
             target_pid_b = target_pid.encode("utf-8") if target_pid else None
             target_uri_b = target_uri.encode("utf-8") if target_uri else None
@@ -385,6 +448,19 @@ def patch_agyhub_summaries_pb(projects_map: Dict[str, Dict[str, Any]]):
             return (item[0], item[1], new_subs)
 
         new_tree = [patch_item(it) for it in tree]
+
+        # Add missing sessions from db_map into pb cache
+        for cid, info in db_map.items():
+            if cid not in seen_cids and info.get("raw"):
+                try:
+                    raw_tree = decode_proto(info["raw"])
+                    new_tree.append((1, 2, [
+                        (1, 2, cid.encode("utf-8")),
+                        (2, 2, raw_tree)
+                    ]))
+                except Exception:
+                    pass
+
         new_pb = encode_proto(new_tree)
         pb_file.write_bytes(new_pb)
     except Exception:
@@ -753,7 +829,7 @@ def deduplicate_and_relink_projects() -> Dict[str, Any]:
             conn = sqlite3.connect(db_path, timeout=10.0)
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
-            cur.execute("SELECT conversation_id, workspace_uris, project_id, raw_summary FROM conversation_summaries")
+            cur.execute("SELECT conversation_id, workspace_uris, project_id, raw_summary, title, preview, step_count, last_modified_time FROM conversation_summaries")
             rows = cur.fetchall()
 
             for r in rows:
@@ -788,6 +864,18 @@ def deduplicate_and_relink_projects() -> Dict[str, Any]:
 
                 need_update = False
                 if curr_pid != target_pid or ws_raw != target_ws_raw:
+                    need_update = True
+
+                if not raw_blob or len(raw_blob) == 0:
+                    raw_blob = synthesize_raw_summary(
+                        cid=cid,
+                        title=r["title"],
+                        preview=r["preview"],
+                        step_count=r["step_count"],
+                        mtime_str=r["last_modified_time"],
+                        ws_raw=target_ws_raw,
+                        pid=target_pid
+                    )
                     need_update = True
 
                 new_raw = patch_protobuf_blob(raw_blob, old_pid=curr_pid, new_pid=target_pid, new_uri=target_uri)
