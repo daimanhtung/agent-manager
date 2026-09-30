@@ -486,6 +486,8 @@ def patch_agyhub_summaries_pb(projects_map: Dict[str, Dict[str, Any]]):
                 seen_cids.add(cid)
                 target_pid = db_map[cid]["pid"]
                 target_uri = db_map[cid]["uri"]
+            else:
+                return None
 
             target_pid_b = target_pid.encode("utf-8") if target_pid else None
             target_uri_b = target_uri.encode("utf-8") if target_uri else None
@@ -553,6 +555,7 @@ def patch_agyhub_summaries_pb(projects_map: Dict[str, Dict[str, Any]]):
             return (item[0], item[1], new_subs)
 
         new_tree = [patch_item(it) for it in tree]
+        new_tree = [it for it in new_tree if it is not None]
 
         # Add missing sessions from db_map into pb cache
         for cid, info in db_map.items():
@@ -1226,39 +1229,45 @@ def import_sessions(
             remote_mtime = meta.get("last_modified_time")
             remote_dt = parse_sqlite_timestamp(remote_mtime)
 
+            should_skip = True
             local_exists = False
-            local_newer = False
-
             for db_path in [APP_CONV_DB, CLI_CONV_DB]:
                 if not db_path.exists():
                     continue
                 try:
                     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
                     cur = conn.cursor()
-                    cur.execute("SELECT last_modified_time, raw_summary FROM conversation_summaries WHERE conversation_id = ?", (cid,))
+                    cur.execute("SELECT last_modified_time, raw_summary, project_id FROM conversation_summaries WHERE conversation_id = ?", (cid,))
                     row = cur.fetchone()
                     conn.close()
-                    if row:
-                        local_exists = True
-                        local_dt = parse_sqlite_timestamp(row[0])
-                        has_local_raw = row[1] is not None and len(row[1]) > 0
-                        conv_db_local = find_local_conversation_db(cid)
-                        has_remote_conv = (entry / "conversation.db").exists()
-                        has_remote_raw = bool(meta.get("_raw_summary_b64"))
+                    if not row:
+                        should_skip = False
+                        break
+                    local_exists = True
+                    local_dt = parse_sqlite_timestamp(row[0])
+                    has_local_raw = row[1] is not None and len(row[1]) > 0
+                    local_pid = row[2]
+                    conv_db_local = find_local_conversation_db(cid)
+                    has_remote_conv = (entry / "conversation.db").exists()
+                    has_remote_raw = bool(meta.get("_raw_summary_b64"))
 
-                        if local_dt and remote_dt and local_dt >= remote_dt:
-                            if has_remote_conv and not conv_db_local:
-                                local_newer = False
-                            elif has_remote_raw and not has_local_raw:
-                                local_newer = False
-                            elif conv_db_local:
-                                local_newer = True
-                            else:
-                                local_newer = True
+                    if not local_dt or str(local_dt).startswith("0001-01-01") or not local_pid:
+                        should_skip = False
+                        break
+                    if remote_dt and local_dt < remote_dt:
+                        should_skip = False
+                        break
+                    if has_remote_conv and not conv_db_local:
+                        should_skip = False
+                        break
+                    if has_remote_raw and not has_local_raw:
+                        should_skip = False
+                        break
                 except Exception:
-                    pass
+                    should_skip = False
+                    break
 
-            if local_newer and not force:
+            if should_skip and not force:
                 stats["skipped"] += 1
                 continue
 
