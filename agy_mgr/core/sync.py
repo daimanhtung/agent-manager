@@ -15,8 +15,78 @@ from agy_mgr.config import (
     GEMINI_HOME,
     REPO_DIR,
     SYNC_DIR,
+    STATE_FILE,
 )
 from agy_mgr.core.sessions import parse_sqlite_timestamp, format_relative_time
+
+
+def is_sync_enabled() -> bool:
+    """Check if session sync is enabled (default: False to protect reports and prevent background overwrites)."""
+    env_val = os.environ.get("AGY_SYNC_ENABLED")
+    if env_val is not None:
+        return env_val.lower() not in ("0", "false", "no", "off", "disable", "disabled")
+
+    if STATE_FILE.exists():
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                d = json.load(f)
+                if "sync_enabled" in d:
+                    return bool(d["sync_enabled"])
+        except Exception:
+            pass
+    return False
+
+
+def set_sync_enabled(enabled: bool):
+    """Enable or disable session sync in state.json."""
+    state = {}
+    if STATE_FILE.exists():
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                state = json.load(f)
+        except Exception:
+            pass
+    state["sync_enabled"] = enabled
+    state["sync_updated_at"] = datetime.now().isoformat()
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+
+
+def is_session_currently_active(cid: str) -> bool:
+    """
+    Check if a session is currently active or in-flight (modified in the last 2 hours or running).
+    Active sessions must NEVER be overwritten by automated or background import!
+    """
+    now = datetime.now(timezone.utc)
+    for db_path in [APP_CONV_DB, CLI_CONV_DB]:
+        if not db_path.exists():
+            continue
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+            cur = conn.cursor()
+            cur.execute("SELECT last_modified_time, not_fully_idle, status FROM conversation_summaries WHERE conversation_id = ?", (cid,))
+            row = cur.fetchone()
+            conn.close()
+            if row:
+                mtime_str, not_idle, status = row
+                if not_idle or status == "CASCADE_RUN_STATUS_RUNNING":
+                    return True
+                dt = parse_sqlite_timestamp(mtime_str)
+                if dt:
+                    diff = (now - dt).total_seconds()
+                    if diff < 7200:  # Active within the last 2 hours
+                        return True
+        except Exception:
+            pass
+
+    # Also check active WAL files
+    for base in [GEMINI_HOME / "antigravity", GEMINI_HOME / "antigravity-cli"]:
+        wal = base / "conversations" / f"{cid}.db-wal"
+        if wal.exists() and wal.stat().st_size > 0:
+            return True
+
+    return False
 
 # SQLite table creation schema if target DB or table doesn't exist
 CREATE_TABLE_SQL = """
@@ -632,11 +702,15 @@ def find_local_annotation(conversation_id: str) -> Optional[Path]:
     return None
 
 
-def copy_brain_tree(src: Path, dst: Path):
+def copy_brain_tree(src: Path, dst: Path, is_import: bool = False):
     """
     Safely copy brain directory from src to dst.
-    Updates newer files and creates missing ones, avoiding massive temp files.
+    Protects reports (.md), transcripts (.jsonl), and plans from destructive overwrites.
+    Never overwrites destination if destination has equal or more bytes!
+    Creates a .bak backup before overwriting during import.
     """
+    if not src.exists():
+        return
     dst.mkdir(parents=True, exist_ok=True)
     for root, dirs, files in os.walk(src):
         rel_root = Path(root).relative_to(src)
@@ -648,12 +722,19 @@ def copy_brain_tree(src: Path, dst: Path):
             try:
                 if src_file.stat().st_size > 50 * 1024 * 1024:
                     continue
-                # For transcript files, NEVER overwrite if destination has more or equal bytes!
-                if f in ("transcript.jsonl", "transcript_full.jsonl") and dst_file.exists():
-                    if dst_file.stat().st_size >= src_file.stat().st_size:
+                if dst_file.exists():
+                    # For all reports (.md), transcripts (.jsonl), text documents:
+                    # NEVER overwrite if destination already has equal or more bytes!
+                    if f.endswith((".md", ".jsonl", ".txt", ".json", ".log")) or f in ("transcript.jsonl", "transcript_full.jsonl"):
+                        if dst_file.stat().st_size >= src_file.stat().st_size:
+                            continue
+                        if is_import:
+                            # Preserve a backup copy before updating
+                            backup_file = dst_file.with_suffix(dst_file.suffix + ".bak")
+                            shutil.copy2(dst_file, backup_file)
+                    elif dst_file.stat().st_mtime >= src_file.stat().st_mtime:
                         continue
-                if not dst_file.exists() or src_file.stat().st_mtime > dst_file.stat().st_mtime:
-                    shutil.copy2(src_file, dst_file)
+                shutil.copy2(src_file, dst_file)
             except Exception:
                 pass
 
@@ -1108,6 +1189,9 @@ def export_sessions(
     Export local sessions, conversation DBs, annotations, and brain data
     into the repository sync folder (SYNC_DIR).
     """
+    if not is_sync_enabled() and not force:
+        return {"exported": 0, "skipped": 0, "errors": 0, "disabled": True}
+
     SYNC_DIR.mkdir(parents=True, exist_ok=True)
     hostname = socket.gethostname()
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -1273,6 +1357,9 @@ def import_sessions(
     Updates SQLite conversation_summaries, conversation.db, annotations, and brain directories.
     Automatically relinks workspace URIs and project_id to the local machine.
     """
+    if not is_sync_enabled() and not force:
+        return {"imported": 0, "updated": 0, "skipped": 0, "errors": 0, "disabled": True}
+
     if not SYNC_DIR.exists():
         return {"imported": 0, "updated": 0, "skipped": 0, "errors": 0}
 
@@ -1292,6 +1379,11 @@ def import_sessions(
 
         cid = entry.name
         if session_ids and cid not in session_ids and not any(cid.startswith(s) for s in session_ids):
+            continue
+
+        # Critical Protection: Do NOT import or touch sessions currently active / running!
+        if is_session_currently_active(cid) and not force:
+            stats["skipped"] += 1
             continue
 
         try:
@@ -1531,7 +1623,7 @@ def import_sessions(
                     targets.append(GEMINI_HOME / "antigravity" / "brain" / cid)
 
                 for t in targets:
-                    copy_brain_tree(brain_src, t)
+                    copy_brain_tree(brain_src, t, is_import=True)
 
             if local_exists:
                 stats["updated"] += 1
@@ -1554,6 +1646,18 @@ def sync_all(limit: int = 0, force: bool = False, project: Optional[str] = None)
     2. Export local sessions to SYNC_DIR (pushing updates to other devices).
     3. Deduplicate and relink sessions to local project paths.
     """
+    if not is_sync_enabled() and not force:
+        return {
+            "imported": 0,
+            "updated": 0,
+            "exported": 0,
+            "skipped": 0,
+            "relinked": 0,
+            "duplicates_removed": 0,
+            "errors": 0,
+            "disabled": True
+        }
+
     import_stats = import_sessions(force=force, project=project)
     export_stats = export_sessions(limit=limit, force=force, project=project)
     relink_stats = deduplicate_and_relink_projects()
@@ -1575,6 +1679,9 @@ def auto_import_synced_sessions():
     Called automatically when listing or resuming sessions.
     Also ensures agyhub_summaries_proto.pb is patched to include all DB sessions.
     """
+    if not is_sync_enabled():
+        return
+
     try:
         if not SYNC_DIR.exists():
             return
@@ -1713,6 +1820,7 @@ def get_sync_status() -> Dict[str, Any]:
 
     return {
         "sync_dir": str(SYNC_DIR),
+        "sync_enabled": is_sync_enabled(),
         "total_synced": len(synced_sessions),
         "total_local": len(local_sessions),
         "pending_pull": pending_pull,

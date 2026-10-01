@@ -176,6 +176,9 @@ def prompt_select_option(options: List[str], prompt: str = "Chọn số thứ t�
 def print_sync_table(status_data: Dict[str, Any]):
     """Print formatted session sync status table."""
     print_header("TÌNH TRẠNG ĐỒNG BỘ SESSION (SYNCTHING / REPO)")
+    sync_enabled = status_data.get("sync_enabled", False)
+    sync_badge = f"{GREEN}● ĐANG BẬT (ENABLED){RESET}" if sync_enabled else f"{RED}■ ĐÃ TẮT (DISABLED - BẢO VỆ BÁO CÁO){RESET}"
+    print(f"Tính năng đồng bộ: {sync_badge}")
     print(f"Thư mục kho sync : {CYAN}{status_data['sync_dir']}{RESET}")
     print(
         f"Tổng quan        : {BOLD}{status_data['in_sync']}{RESET} Đã đồng bộ | "

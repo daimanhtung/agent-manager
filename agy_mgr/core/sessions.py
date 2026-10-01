@@ -129,17 +129,8 @@ def list_all_sessions(limit: Optional[int] = 50, filter_workspace: Optional[str]
     """
     Get combined, deduplicated sessions from both Antigravity App and Antigravity CLI.
     Sorted by most recent activity.
+    Read-only and safe: never triggers background imports or overwrites.
     """
-    # Merge any incoming Syncthing conflict databases automatically
-    merge_syncthing_conflict_dbs()
-
-    # Automatically import any synced sessions received from other devices via Syncthing
-    try:
-        from agy_mgr.core.sync import auto_import_synced_sessions
-        auto_import_synced_sessions()
-    except Exception:
-        pass
-
     fetch_limit = 1000 if (not limit or limit <= 0) else max(limit * 2, 200)
     app_sessions = read_db_sessions(APP_CONV_DB, "App", limit=fetch_limit)
     cli_sessions = read_db_sessions(CLI_CONV_DB, "CLI", limit=fetch_limit)

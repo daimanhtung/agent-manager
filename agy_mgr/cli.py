@@ -232,9 +232,32 @@ def cmd_sync(args):
     sess_id = getattr(args, "id", None)
     project = getattr(args, "project", None)
 
+    if action in ("off", "disable", "stop"):
+        from agy_mgr.core.sync import set_sync_enabled
+        set_sync_enabled(False)
+        print(f"\n{YELLOW}[!] Đã TẮT tính năng đồng bộ session.{RESET}")
+        print(f"[*] Quá trình đồng bộ nền và tự động nhập/xuất đã được dừng hoàn toàn để bảo vệ session và báo cáo.")
+        print(f"[*] Để bật lại sau này, hãy dùng: {BOLD}agy-mgr sync on{RESET}\n")
+        return
+
+    if action in ("on", "enable", "start"):
+        from agy_mgr.core.sync import set_sync_enabled
+        set_sync_enabled(True)
+        print(f"\n{GREEN}[✓] Đã BẬT tính năng đồng bộ session.{RESET}")
+        print(f"[*] Cơ chế bảo vệ báo cáo (.md / .jsonl) sẽ luôn tự động giữ lại file có dung lượng lớn hơn và sao lưu trước khi ghi đè.")
+        print(f"[*] Để tắt lại, hãy dùng: {BOLD}agy-mgr sync off{RESET}\n")
+        return
+
     if action in ("status", "st"):
         st = get_sync_status()
         print_sync_table(st)
+        return
+
+    from agy_mgr.core.sync import is_sync_enabled
+    if not is_sync_enabled() and not force:
+        print(f"\n{YELLOW}[!] Tính năng đồng bộ session hiện đang bị TẮT (để bảo vệ session và tránh mất báo cáo).{RESET}")
+        print(f"[*] Để bật lại đồng bộ, hãy chạy: {BOLD}agy-mgr sync on{RESET}")
+        print(f"[*] Hoặc nếu muốn ép buộc chạy 1 lần duy nhất, hãy thêm cờ: {BOLD}--force{RESET}\n")
         return
 
     if action in ("push", "export"):
@@ -337,7 +360,7 @@ def main():
 
     # sync
     p_sync = subparsers.add_parser("sync", help="Đồng bộ session giữa các thiết bị (qua Syncthing / Repo)")
-    p_sync.add_argument("sync_action", nargs="?", choices=["push", "export", "pull", "import", "status", "st", "relink", "repair", "fix"], help="Hành động: push (xuất), pull (nhập), status (kiểm tra), relink (ánh xạ lại project). Mặc định là đồng bộ 2 chiều")
+    p_sync.add_argument("sync_action", nargs="?", choices=["on", "enable", "off", "disable", "stop", "push", "export", "pull", "import", "status", "st", "relink", "repair", "fix"], help="Hành động: on (bật), off (tắt bảo vệ báo cáo), push (xuất), pull (nhập), status (kiểm tra), relink (ánh xạ lại project). Mặc định là đồng bộ 2 chiều")
     p_sync.add_argument("--id", help="Chỉ đồng bộ một session ID cụ thể")
     p_sync.add_argument("--limit", "-n", type=int, default=0, help="Số session gần nhất cần đồng bộ (mặc định: 0 = toàn bộ)")
     p_sync.add_argument("--all", "-a", action="store_true", help="Đồng bộ toàn bộ session không giới hạn số lượng")
