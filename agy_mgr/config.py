@@ -27,6 +27,9 @@ AUTH_FILES = [
 # Binaries
 AGY_BIN = shutil.which("agy") or str(HOME / ".local" / "bin" / "agy")
 ANTIGRAVITY_APP_PATH = Path("/Applications/Antigravity.app")
+ANTIGRAVITY_APP_SUPPORT_DIR = HOME / "Library" / "Application Support" / "Antigravity"
+ANTIGRAVITY_VSCDB = ANTIGRAVITY_APP_SUPPORT_DIR / "User" / "globalStorage" / "state.vscdb"
+ANTIGRAVITY_APP_STORAGE = ANTIGRAVITY_APP_SUPPORT_DIR / "app_storage.json"
 
 # Repository & Syncthing Session Sync
 REPO_DIR = Path(__file__).resolve().parent.parent

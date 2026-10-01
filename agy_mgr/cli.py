@@ -70,7 +70,8 @@ def cmd_switch(args):
         print(f"[*] Tài khoản '{target}' hiện đã đang active.")
         return
 
-    success = switch_account(target)
+    restart_app = not getattr(args, "no_restart", False)
+    success = switch_account(target, restart_app=restart_app)
     if success:
         print(f"\n{GREEN}[+] Đã chuyển active sang tài khoản: {BOLD}{target}{RESET}")
         print(f"    (Antigravity CLI và Desktop App đã được tự động đồng bộ sang tài khoản mới)")
@@ -304,6 +305,7 @@ def main():
     # switch
     p_switch = subparsers.add_parser("switch", aliases=["sw"], help="Chuyển đổi tài khoản active")
     p_switch.add_argument("name", nargs="?", help="Tên profile tài khoản muốn chuyển sang")
+    p_switch.add_argument("--no-restart", action="store_true", help="Không tự động khởi động lại Antigravity Desktop App")
     p_switch.set_defaults(func=cmd_switch)
 
     # quota
