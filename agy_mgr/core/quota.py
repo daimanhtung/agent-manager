@@ -16,7 +16,7 @@ def find_running_language_server() -> Optional[Dict[str, Any]]:
         out = subprocess.check_output(["ps", "aux"], text=True)
         for line in out.splitlines():
             if "language_server" in line and "--csrf_token" in line:
-                m_csrf = re.search(r"--csrf_token\s+([a-zA-Z0-9-]+)", line)
+                m_csrf = re.search(r"--csrf_token[=\s]+([a-zA-Z0-9-]+)", line)
                 parts = line.split()
                 if len(parts) > 1 and m_csrf:
                     pid = parts[1]
@@ -39,35 +39,55 @@ def find_running_language_server() -> Optional[Dict[str, Any]]:
 def fetch_quota_from_ls(ls_info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Query live quota from Antigravity language_server."""
     csrf = ls_info.get("csrf")
+    import ssl
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        urllib.request.HTTPSHandler(context=ctx)
+    )
+
     for port in ls_info.get("ports", []):
-        url = f"http://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
-        try:
-            req = urllib.request.Request(
-                url,
-                data=b"{}",
-                headers={
-                    "Content-Type": "application/json",
-                    "X-Codeium-Csrf-Token": csrf
-                }
-            )
-            with urllib.request.urlopen(req, timeout=2.5) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                return parse_quota_response(data)
-        except Exception:
-            continue
+        for proto in ["https", "http"]:
+            url = f"{proto}://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
+            try:
+                req = urllib.request.Request(
+                    url,
+                    data=b"{}",
+                    headers={
+                        "Content-Type": "application/json",
+                        "Connect-Protocol-Version": "1",
+                        "X-Codeium-Csrf-Token": csrf
+                    }
+                )
+                with opener.open(req, timeout=1.5) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    parsed = parse_quota_response(data)
+                    if parsed and (parsed.get("gemini_5h_fraction") is not None or parsed.get("claude_weekly_fraction") is not None):
+                        return parsed
+            except Exception:
+                continue
     return None
 
 
 def parse_quota_response(raw: Dict[str, Any]) -> Dict[str, Any]:
     """Parse raw RetrieveUserQuotaSummaryResponse into a clean dictionary."""
     groups = raw.get("response", {}).get("groups", [])
+    if not groups and "groups" in raw:
+        groups = raw.get("groups", [])
+
     parsed = {
         "gemini_5h_fraction": None,
         "gemini_5h_reset": None,
         "gemini_weekly_fraction": None,
         "gemini_weekly_reset": None,
+        "claude_5h_fraction": None,
+        "claude_5h_reset": None,
         "claude_weekly_fraction": None,
         "claude_weekly_reset": None,
+        "gemini_unlimited": True,
         "raw_groups": groups,
         "updated_at": datetime.now(timezone.utc).isoformat()
     }
@@ -76,22 +96,32 @@ def parse_quota_response(raw: Dict[str, Any]) -> Dict[str, Any]:
         dname = g.get("displayName", "").lower()
         buckets = g.get("buckets", [])
         if "gemini" in dname:
+            parsed["gemini_unlimited"] = False
             for b in buckets:
-                win = b.get("window", "")
+                win = b.get("window", "").lower()
+                bid = b.get("bucketId", "").lower()
+                bname = b.get("displayName", "").lower()
                 frac = b.get("remainingFraction")
                 reset = b.get("resetTime")
-                if win == "5h" or "five hour" in b.get("displayName", "").lower():
+                if win == "5h" or "5h" in bid or "five hour" in bname:
                     parsed["gemini_5h_fraction"] = frac
                     parsed["gemini_5h_reset"] = reset
-                elif win == "weekly" or "weekly" in b.get("displayName", "").lower():
+                elif win == "weekly" or "weekly" in bid or "weekly" in bname:
                     parsed["gemini_weekly_fraction"] = frac
                     parsed["gemini_weekly_reset"] = reset
-        elif "claude" in dname or "gpt" in dname:
+        elif "claude" in dname or "gpt" in dname or "3p" in dname:
             for b in buckets:
-                win = b.get("window", "")
-                if win == "weekly" or "weekly" in b.get("displayName", "").lower():
-                    parsed["claude_weekly_fraction"] = b.get("remainingFraction")
-                    parsed["claude_weekly_reset"] = b.get("resetTime")
+                win = b.get("window", "").lower()
+                bid = b.get("bucketId", "").lower()
+                bname = b.get("displayName", "").lower()
+                frac = b.get("remainingFraction")
+                reset = b.get("resetTime")
+                if win == "5h" or "5h" in bid or "five hour" in bname:
+                    parsed["claude_5h_fraction"] = frac
+                    parsed["claude_5h_reset"] = reset
+                elif win == "weekly" or "weekly" in bid or "weekly" in bname:
+                    parsed["claude_weekly_fraction"] = frac
+                    parsed["claude_weekly_reset"] = reset
 
     return parsed
 
@@ -153,26 +183,28 @@ def fetch_quota_isolated_for_profile(profile_name: str) -> Optional[Dict[str, An
             "/Applications/Antigravity.app/Contents/Resources/bin/language_server",
             "--standalone",
             "--csrf_token", csrf,
-            "--cloud_code_endpoint", "https://daily-cloudcode-pa.googleapis.com",
+            "--cloud_code_endpoint", "https://cloudcode-pa.googleapis.com",
             "--http_server_port", str(free_port),
             "--https_server_port", "0"
         ]
 
         proc = subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         try:
-            url = f"http://127.0.0.1:{free_port}/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
+            url = f"http://localhost:{free_port}/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
             req = urllib.request.Request(
                 url,
                 data=b"{}",
                 headers={
                     "Content-Type": "application/json",
+                    "Connect-Protocol-Version": "1",
                     "X-Codeium-Csrf-Token": csrf
                 }
             )
-            for _ in range(20):
-                time.sleep(0.2)
+            for _ in range(25):
+                time.sleep(0.25)
                 try:
-                    with urllib.request.urlopen(req, timeout=1.5) as resp:
+                    with opener.open(req, timeout=1.5) as resp:
                         data = json.loads(resp.read().decode())
                         return parse_quota_response(data)
                 except Exception:
@@ -199,7 +231,13 @@ def get_all_accounts_quota(refresh_all: bool = False) -> List[Dict[str, Any]]:
     if refresh_all:
         for acc in accounts:
             name = acc["name"]
-            q = fetch_quota_isolated_for_profile(name)
+            q = None
+            if name == active_name:
+                ls_info = find_running_language_server()
+                if ls_info:
+                    q = fetch_quota_from_ls(ls_info)
+            if not q:
+                q = fetch_quota_isolated_for_profile(name)
             if q:
                 cached_quotas[name] = q
         state["cached_quotas"] = cached_quotas
@@ -213,12 +251,13 @@ def get_all_accounts_quota(refresh_all: bool = False) -> List[Dict[str, Any]]:
             "email": acc["email"],
             "is_active": (name == active_name),
             "cooldown": acc.get("cooldown"),
-            "gemini_5h": None,
-            "gemini_weekly": None,
+            "claude_5h": None,
             "claude_weekly": None,
             "reset_5h": None,
             "reset_weekly": None,
-            "claude_reset": None,
+            "gemini_5h": None,
+            "gemini_weekly": None,
+            "gemini_unlimited": True,
             "status": "Ready"
         }
 
@@ -234,7 +273,12 @@ def get_all_accounts_quota(refresh_all: bool = False) -> List[Dict[str, Any]]:
         q = None
         # For active account (when not refresh_all), or if account not yet in cache, fetch it
         if item["is_active"] and not refresh_all:
-            q = fetch_quota_isolated_for_profile(name)
+            # First try running language server (instant), then fallback to isolated
+            ls_info = find_running_language_server()
+            if ls_info:
+                q = fetch_quota_from_ls(ls_info)
+            if not q:
+                q = fetch_quota_isolated_for_profile(name)
             if q:
                 cached_quotas[name] = q
                 state["cached_quotas"] = cached_quotas
@@ -249,17 +293,38 @@ def get_all_accounts_quota(refresh_all: bool = False) -> List[Dict[str, Any]]:
                 state["cached_quotas"] = cached_quotas
                 save_state(state)
 
+        # Upgrade existing cached quota from raw_groups if missing new fields
+        if q and ("claude_5h_fraction" not in q or "gemini_unlimited" not in q):
+            raw_g = q.get("raw_groups", [])
+            if raw_g:
+                reparsed = parse_quota_response({"groups": raw_g})
+                reparsed["updated_at"] = q.get("updated_at", reparsed["updated_at"])
+                q = reparsed
+                cached_quotas[name] = q
+                state["cached_quotas"] = cached_quotas
+                save_state(state)
+
         if q:
             item["gemini_5h"] = q.get("gemini_5h_fraction")
             item["gemini_weekly"] = q.get("gemini_weekly_fraction")
+            item["claude_5h"] = q.get("claude_5h_fraction")
             item["claude_weekly"] = q.get("claude_weekly_fraction")
-            item["reset_5h"] = format_reset_time(q.get("gemini_5h_reset"))
-            item["reset_weekly"] = format_reset_time(q.get("gemini_weekly_reset"))
+            item["reset_5h"] = format_reset_time(q.get("gemini_5h_reset") or q.get("claude_5h_reset"))
+            item["reset_weekly"] = format_reset_time(q.get("gemini_weekly_reset") or q.get("claude_weekly_reset"))
             item["claude_reset"] = format_reset_time(q.get("claude_weekly_reset"))
-            if item["gemini_5h"] == 0 or item["gemini_weekly"] == 0:
+
+            # Quota exhausted detection
+            is_exhausted = (
+                (item["gemini_5h"] is not None and item["gemini_5h"] == 0) or
+                (item["gemini_weekly"] is not None and item["gemini_weekly"] == 0) or
+                (item["claude_weekly"] is not None and item["claude_weekly"] == 0)
+            )
+            if is_exhausted:
                 item["status"] = "Exhausted"
             elif item["is_active"]:
                 item["status"] = "Active (Live)"
+            elif refresh_all:
+                item["status"] = "Standby (Live)"
             else:
                 item["status"] = "Standby (Cached)"
         else:

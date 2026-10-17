@@ -12,7 +12,7 @@ Bộ công cụ mạnh mẽ và tiện lợi giúp quản trị đa tài khoản
    - Tự động đồng bộ sang cả Antigravity CLI và Antigravity Desktop App.
 2. **Theo Dõi Quota Thời Gian Thực (Unified Quota Tracker):**
    - Xem % quota còn lại của tất cả tài khoản với thanh tiến độ trực quan (`[████████░░] 89%`).
-   - Hiển thị cả hạn mức ngắn hạn (5 giờ) và dài hạn (tuần) cho Gemini Models và Claude/GPT.
+   - Hiển thị cả hạn mức ngắn hạn (5 giờ) và dài hạn (tuần) cho Claude/GPT Models, cùng trạng thái khả dụng của Gemini.
    - Hiển thị thời gian đếm ngược reset quota.
 3. **Quản Lý Session Tập Trung (Unified Session Manager):**
    - Tổng hợp toàn bộ session từ cả **Antigravity App** và **`agy` CLI** theo thời gian thực.
@@ -83,11 +83,11 @@ agy-mgr quota
 ```text
 === BẢNG THEO DÕI QUOTA TẤT CẢ TÀI KHOẢN ===
 
-Tài khoản          Trạng thái       Gemini (5h)                  Gemini (Tuần)                Reset vào      
-─────────────────────────────────────────────────────────────────────────────────────────────────────────
-★ fruitninja2909   Active (Live)    [██████████░░]  89%          [███████░░░░░]  64%          3h 0m
-  acc2             Standby          [████████████] 100%          [████████████] 100%          Sẵn sàng
-─────────────────────────────────────────────────────────────────────────────────────────────────────────
+Tài khoản          Trạng thái         Claude (5h)          Reset 5h     Claude (Tuần)        Reset Tuần     Gemini            
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+★ fruitninja2909   Active (Live)      [████████░░]  89%    2h 15m       [██████████] 100%    5d 14h         ✓ Unlimited       
+  acc2             Standby (Cached)   [██████████] 100%    Sẵn sàng     [███████░░░]  75%    3d  8h         ✓ Unlimited       
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ```
 
 ### 3. Quản lý & Tiếp tục Session Làm Việc

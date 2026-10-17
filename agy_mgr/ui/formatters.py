@@ -97,7 +97,7 @@ def print_quota_table(quotas: List[Dict[str, Any]]):
             name_display = f"  {name}"
 
         status = q["status"]
-        if "Active" in status:
+        if "Active" in status or "Live" in status:
             status_color = f"{GREEN}{status}{RESET}"
         elif "Cooldown" in status or "Exhausted" in status:
             status_color = f"{RED}{status}{RESET}"

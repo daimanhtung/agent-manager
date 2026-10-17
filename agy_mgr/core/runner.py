@@ -42,10 +42,13 @@ def select_best_account(strategy: str = "highest_quota") -> Optional[str]:
     current_active = get_active_account_name()
 
     if strategy == "highest_quota":
-        # Sort by gemini_weekly quota (descending), None treated as 1.0 (untested/available)
+        # Sort by remaining quota (min of claude_5h, claude_weekly, gemini_weekly)
         def score(acc):
-            frac = acc.get("gemini_weekly")
-            return 1.0 if frac is None else frac
+            c_5h = acc.get("claude_5h")
+            c_wk = acc.get("claude_weekly")
+            g_wk = acc.get("gemini_weekly")
+            scores = [v for v in [c_5h, c_wk, g_wk] if v is not None]
+            return min(scores) if scores else 1.0
         available.sort(key=score, reverse=True)
         return available[0]["name"]
 
