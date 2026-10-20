@@ -16,6 +16,9 @@ def find_running_language_server() -> Optional[Dict[str, Any]]:
         out = subprocess.check_output(["ps", "aux"], text=True)
         for line in out.splitlines():
             if "language_server" in line and "--csrf_token" in line:
+                # Ignore isolated temporary quota sandbox processes
+                if "agy_quota_" in line or "agy_test_" in line or "agy_debug_" in line:
+                    continue
                 m_csrf = re.search(r"--csrf_token[=\s]+([a-zA-Z0-9-]+)", line)
                 parts = line.split()
                 if len(parts) > 1 and m_csrf:
@@ -150,76 +153,67 @@ def format_reset_time(iso_str: Optional[str]) -> str:
         return iso_str
 
 
-def fetch_quota_isolated_for_profile(profile_name: str) -> Optional[Dict[str, Any]]:
+def fetch_quota_direct_http(profile_name: str) -> Optional[Dict[str, Any]]:
     """
-    Query exact live quota for any profile independently in an isolated sandbox.
-    Does not touch active user, macOS Keychain, or Desktop App.
+    Query live quota directly from Google Cloud Code PA API using profile access token.
+    Never spawns language_server, never alters $HOME, never accesses macOS Keychain.
+    Completely eliminates any macOS Keychain reset prompts or delays.
     """
     from agy_mgr.config import PROFILES_DIR
-    import socket
-    import tempfile
-    import shutil
-    from pathlib import Path
-
-    src_profile = PROFILES_DIR / profile_name
-    if not src_profile.exists():
+    profile_dir = PROFILES_DIR / profile_name
+    if not profile_dir.exists():
         return None
 
-    temp_dir = Path(tempfile.mkdtemp(prefix=f"agy_quota_{profile_name}_"))
-    try:
-        temp_gemini = temp_dir / ".gemini"
-        shutil.copytree(src_profile, temp_gemini)
+    # Find valid access_token from saved profile files
+    access_token = None
+    for token_file_name in ["jetski-standalone-oauth-token", "keychain_token.json", "antigravity-cli/antigravity-oauth-token"]:
+        f = profile_dir / token_file_name
+        if f.exists():
+            try:
+                d = json.loads(f.read_text())
+                tok = d.get("token")
+                if isinstance(tok, dict) and tok.get("access_token"):
+                    access_token = tok["access_token"]
+                    break
+                elif isinstance(tok, str) and tok.startswith("ya29."):
+                    access_token = tok
+                    break
+                elif d.get("access_token"):
+                    access_token = d["access_token"]
+                    break
+            except Exception:
+                pass
 
-        # Find an available local port
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(('127.0.0.1', 0))
-            free_port = s.getsockname()[1]
+    if not access_token:
+        return None
 
-        csrf = f"csrf-{profile_name}-{int(time.time())}"
-        env = os.environ.copy()
-        env["HOME"] = str(temp_dir)
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "User-Agent": "antigravity/2.24.0"
+    }
 
-        cmd = [
-            "/Applications/Antigravity.app/Contents/Resources/bin/language_server",
-            "--standalone",
-            "--csrf_token", csrf,
-            "--cloud_code_endpoint", "https://cloudcode-pa.googleapis.com",
-            "--http_server_port", str(free_port),
-            "--https_server_port", "0"
-        ]
+    endpoints = [
+        "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+        "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+    ]
 
-        proc = subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    for ep in endpoints:
         try:
-            url = f"http://localhost:{free_port}/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
-            req = urllib.request.Request(
-                url,
-                data=b"{}",
-                headers={
-                    "Content-Type": "application/json",
-                    "Connect-Protocol-Version": "1",
-                    "X-Codeium-Csrf-Token": csrf
-                }
-            )
-            for _ in range(25):
-                time.sleep(0.25)
-                try:
-                    with opener.open(req, timeout=1.5) as resp:
-                        data = json.loads(resp.read().decode())
-                        return parse_quota_response(data)
-                except Exception:
-                    continue
-        finally:
-            proc.kill()
-    except Exception:
-        pass
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+            req = urllib.request.Request(ep, data=b"{}", headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=2.0) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                parsed = parse_quota_response(data)
+                if parsed and (parsed.get("gemini_5h_fraction") is not None or parsed.get("gemini_weekly_fraction") is not None):
+                    return parsed
+        except Exception:
+            continue
+
     return None
 
 
 def get_all_accounts_quota(refresh_all: bool = False) -> List[Dict[str, Any]]:
-    """Retrieve quota for all registered accounts, using isolated query per profile for true independent quota."""
+    """Retrieve quota for all registered accounts using running language_server for active and direct HTTP / cache for standby."""
     from agy_mgr.core.accounts import get_state, save_state
 
     accounts = list_accounts()
@@ -227,7 +221,7 @@ def get_all_accounts_quota(refresh_all: bool = False) -> List[Dict[str, Any]]:
     state = get_state()
     cached_quotas = state.get("cached_quotas", {})
 
-    # If refresh_all is requested, fetch live quota for each account independently
+    # If refresh_all is requested, fetch live quota for each account via direct HTTP API
     if refresh_all:
         for acc in accounts:
             name = acc["name"]
@@ -237,7 +231,7 @@ def get_all_accounts_quota(refresh_all: bool = False) -> List[Dict[str, Any]]:
                 if ls_info:
                     q = fetch_quota_from_ls(ls_info)
             if not q:
-                q = fetch_quota_isolated_for_profile(name)
+                q = fetch_quota_direct_http(name)
             if q:
                 cached_quotas[name] = q
         state["cached_quotas"] = cached_quotas
@@ -271,14 +265,13 @@ def get_all_accounts_quota(refresh_all: bool = False) -> List[Dict[str, Any]]:
             continue
 
         q = None
-        # For active account (when not refresh_all), or if account not yet in cache, fetch it
+        # For active account (when not refresh_all), query running language_server or fallback to direct HTTP
         if item["is_active"] and not refresh_all:
-            # First try running language server (instant), then fallback to isolated
             ls_info = find_running_language_server()
             if ls_info:
                 q = fetch_quota_from_ls(ls_info)
             if not q:
-                q = fetch_quota_isolated_for_profile(name)
+                q = fetch_quota_direct_http(name)
             if q:
                 cached_quotas[name] = q
                 state["cached_quotas"] = cached_quotas
@@ -286,8 +279,8 @@ def get_all_accounts_quota(refresh_all: bool = False) -> List[Dict[str, Any]]:
         elif name in cached_quotas:
             q = cached_quotas[name]
         else:
-            # First time seeing this account, fetch it
-            q = fetch_quota_isolated_for_profile(name)
+            # First time seeing this account, try direct HTTP query
+            q = fetch_quota_direct_http(name)
             if q:
                 cached_quotas[name] = q
                 state["cached_quotas"] = cached_quotas
